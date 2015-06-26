@@ -32,8 +32,6 @@ Streaming
 Contact / updates
 =================
 
-Latest version is avaliable at http://code.google.com/p/demovibes
-Authors can be contacted at terra@thelazy.net (Terrasque) and andy@f1-software.com (FishGuy876)
-
+Latest version is avaliable at https://github.com/arabek/demovibes/
 
 This code is released as GPL. May contain traces of NUTS!
