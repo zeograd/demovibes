@@ -1,3 +1,4 @@
 [submodule "demosauce"]
 	path = demosauce
-	url = https://git.gitorious.org/demovibes/demosauce.git
+	url = https://gitlab.com/maep/demosauce.git
+	branch = master
