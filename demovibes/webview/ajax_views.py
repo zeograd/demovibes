@@ -3,6 +3,7 @@ from demovibes.webview.common import *
 from django.http import HttpResponseRedirect
 from django.http import HttpResponse
 from django.views.decorators.cache import cache_control
+from django.views.decorators.cache import cache_page
 from django.shortcuts import render_to_response
 
 from mybaseview import MyBaseView
@@ -19,14 +20,21 @@ import time, datetime
 from django.core.cache import cache
 import j2shim
 import re
+import hashlib
 
 idlist = re.compile(r'^(\d+,)+\d+$')
 
 use_eventful = getattr(settings, 'USE_EVENTFUL', False)
+UWSGI_ID_SECRET = getattr(settings, 'UWSGI_ID_SECRET', False)
 
 class AjaxView(MyBaseView):
     basetemplate = "webview/js/"
 
+@cache_page(60*60*24)
+@cache_control(max_age=3600*24)
+def smileys(request):
+    s = simplejson.dumps(settings.SMILEYS)
+    return HttpResponse(s, "application/json")
 
 class LicenseView(AjaxView):
     template = "license.html"
@@ -38,7 +46,7 @@ class LicenseView(AjaxView):
 
 def songinfo(request):
     def makeinfo(song):
-        return {"title": song.title, "artists": song.artist(), "id": song.id, "url": song.get_absolute_url(), "slength": song.song_length}
+        return {"title": song.title, "artists": song.artist(), "id": song.id, "url": song.get_absolute_url(), "slength": song.get_songlength()}
     songid = request.REQUEST.get("q", "").strip()
     if not songid:
         return HttpResponse('{"error": "Empty input"}')
@@ -71,19 +79,25 @@ def songinfo(request):
 def ping(request, event_id):
     if getattr(settings, "DISABLE_AJAX", False):
         raise
+    GET_UID = ""
     if request.user.is_authenticated():
         key = "uonli_%s" % request.user.id
+        GET_UID = "?uid=%s" % request.user.id
+        if UWSGI_ID_SECRET:
+            hash = hashlib.sha1("%s.%s" % (request.user.id, UWSGI_ID_SECRET)).hexdigest()
+            GET_UID = GET_UID + "&sign=" + hash
         get = cache.get(key)
         if not get:
             P = get_profile(request.user)
+            P.last_ip = request.META["REMOTE_ADDR"]
             P.last_activity = datetime.datetime.now()
-            P.set_flag_from_ip(request.META['REMOTE_ADDR'])
+            P.set_flag_from_ip(request.META.get('REMOTE_ADDR'))
             P.save()
             cache.set(key, "1", 100)
-    return HttpResponseRedirect("/demovibes/ajax/monitor/%s/" % event_id)
+    return HttpResponseRedirect("/demovibes/ajax/monitor/%s/%s" % (event_id, GET_UID))
 
 def monitor(request, event_id):
-    for x in range(120):
+    for x in range(30):
         R = AjaxEvent.objects.filter(id__gt=event_id).order_by('id')
         if R:
             entries = list()
@@ -94,7 +108,7 @@ def monitor(request, event_id):
             ajaxid = R.order_by('-id')[0].id + 1
             return render_to_response('webview/js/manager.html', \
                 { 'events' : entries, 'id' : ajaxid },  context_instance=RequestContext(request))
-        time.sleep(2)
+        time.sleep(1)
     return HttpResponse("")
 
 
@@ -119,7 +133,7 @@ def oneliner_submit(request):
     return HttpResponse("OK")
 
 def get_tags(request):
-    q = request.GET['q']
+    q = request.GET.get('q')
     if q:
         l = []
         t = Tag.objects.filter(name__istartswith=q)[:20]
@@ -136,6 +150,10 @@ def oneliner(request):
 @cache_control(must_revalidate=True, max_age=30)
 def songupdate(request, song_id):
     song = Song.objects.get(id=song_id)
+    return HttpResponse("""<span style="display:none">l</span>
+                <img class="song_tail" src="%slock.png" title="Locked" alt="Locked"/>""" %
+                settings.MEDIA_URL)
+
     return j2shim.r2r('webview/js/generic.html', {
         'song' : song,
         'event' : "a_queue_%i" % song.id,
@@ -143,10 +161,9 @@ def songupdate(request, song_id):
         },  request)
 
 def words(request, prefix):
-    extrawords=['boobies','boobietrap','nectarine'];
-    words= [a.username+"" for a in User.objects.filter(username__istartswith=prefix)];
-    words.extend([a.handle+"" for a in Artist.objects.filter(handle__istartswith=prefix)]);
-    words.extend([a.name+"" for a in Artist.objects.filter(name__istartswith=prefix)]);
-    words.extend([a.name+"" for a in Group.objects.filter(name__istartswith=prefix)]);
-    words.extend([a for a in extrawords if a.lower().startswith(prefix.lower())]);
-    return HttpResponse(",".join(words));
+    extrawords = ['boobies', 'boobietrap', 'nectarine']
+    words = [a.user.username for a in Userprofile.objects.filter(user__username__istartswith = prefix).order_by("-last_activity")[:20] ]
+    words.extend( [a.handle for a in Artist.objects.filter(handle__istartswith = prefix)[:20] ] )
+    words.extend( [a.name for a in Group.objects.filter(name__istartswith = prefix)[:20] ] )
+    words.extend( [a for a in extrawords if a.lower().startswith( prefix.lower() ) ] )
+    return HttpResponse(",".join(words))

@@ -7,7 +7,7 @@
     <div id="sidebar">
         <h3>Welcome, {% if user.is_authenticated %}{{ user }}{% else %}Visitor{% endif %}!</h3>
         {% block sidebar %}
-        <ul>
+        <ul class="menulist">
             <li id="home"><a href="{% url dv-root %}">Home</a></li>
             <li id="forum"><a href="{% url forum_index %}">Forum</a></li>
             <li id="songs"><a href="{% url dv-songs %}">Songs</a></li>
@@ -32,6 +32,7 @@
         {% if user.is_authenticated %}
         <form action="{% url dv-oneliner_submit %}" method="post" enctype="application/x-www-form-urlencoded"  onsubmit="apf('{% url dv-ax-oneliner_submit %}',this); this.Line.value = ''; return false;" >
             <input id="blah" name="Line" autocomplete="off" maxlength="256" onkeydown="return tc(this,event.keyCode);" onkeypress="return canceltab(event.keyCode);" value="GURU MEDITATION" onfocus="if (this.value == 'GURU MEDITATION') { this.value=''; }" /><input id="makeitso" type="submit" value="" />
+            <div class="onelinertools"></div>
         </form>
         {% endif %}
         {% get_oneliner %}
@@ -45,6 +46,7 @@
 
     <div id="rightside">
         <h3>User Menu</h3>
+        <div class="message-display-settings">Notification settings</div>
         <ul>
         {% if user.is_authenticated %}
             <li id="profile"><a href="{% url dv-my_profile %}">Edit My Profile</a></li>
@@ -59,6 +61,9 @@
         {% endif %}
         {% if perms.webview.change_song %}
             <li id="menuqueue"><a href="{% url dv-uploads %}">Unapproved Uploads</a></li>
+        {% endif %}
+        {% if perms.webview.add_mute_oneliner %}
+                <li id="menumute"><a href="{% url dv-muteoneliner %}">Mute account</a></li>
         {% endif %}
         {% if user.is_staff %}
         <li></li>
@@ -87,7 +92,7 @@
 
     <form>
         <hr style="width: 80%; background-color: #000; height: 1px; border: 0px;" />
-        <input type="button" style="border: 1px solid; border-color: #333;" value="Listen" onClick="window.open('{% url dv-play_stream %}','player','width=170,height=130,toolbar=no,scrollbars=no,resizable=no,location=no,directories=no,status=no,menubar=no,copyhistory=no')" /> - <a href="{% url dv-streams %}">Streams</a>
+        <input type="button" style="border: 1px solid; border-color: #333;" value="Listen" onClick="window.open('{% url dv-play_stream %}','player','width=340,height=25,toolbar=no,scrollbars=no,resizable=no,location=no,directories=no,status=no,menubar=no,copyhistory=no')" /> - <a href="{% url dv-streams %}">Streams</a>
     </form>
 
     {% get_sidebar_news %}

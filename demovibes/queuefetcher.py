@@ -3,14 +3,15 @@ from datetime import datetime, timedelta
 import time
 import bitly
 from os import popen
-import logging, logging.config
 from django.core.management import setup_environ
 import settings
 setup_environ(settings)
-from webview.models import *
+from webview.models import Queue, Song
 from django.contrib.auth.models import User
 from django.contrib.sites.models import Site
 from webview import common
+
+import logging, logging.config
 
 class song_finder(object):
     songweight = {
@@ -30,7 +31,7 @@ class song_finder(object):
         self.timestamp = None
         self.song = None
 
-        self.log = logging.getLogger("pyAdder")
+        self.log = logging.getLogger("dv.queuefetcher")
 
         if not djuser:
             djuser = getattr(settings, 'DJ_USERNAME', "djrandom")
@@ -62,7 +63,7 @@ class song_finder(object):
         """
         Return next queued song, or a random song, or a jingle.
         """
-        songs = Queue.objects.filter(played=False, playtime__lte = datetime.datetime.now()).order_by('-priority', 'id')
+        songs = Queue.objects.filter(played=False, playtime__lte = datetime.now()).order_by('-priority', 'id')
         if not songs: # Since OR queries have been problematic on production server earlier, we do this hack..
             songs = Queue.objects.filter(played=False, playtime = None).order_by('-priority', 'id')
         if settings.PLAY_JINGLES:
@@ -84,11 +85,11 @@ class song_finder(object):
         Return next song filepath to be played
         """
         if self.timestamp:
-            delta = datetime.datetime.now() - self.timestamp
+            delta = datetime.now() - self.timestamp
             if delta < timedelta(seconds=3):
                 self.log.warning(u"Song '%s' stopped playing after less than 3 seconds for some reason!" % self.meta)
                 time.sleep(3)
-        self.timestamp = datetime.datetime.now()
+        self.timestamp = datetime.now()
 
         song = self.findQueued()
 
@@ -139,7 +140,7 @@ class song_finder(object):
     def init_jt(self):
         self.jt = {
             'count': 0,
-            'timelast': datetime.datetime.now(),
+            'timelast': datetime.now(),
             'max': timedelta(minutes = 30),
             'min': timedelta(minutes = 20)
         }
@@ -166,10 +167,10 @@ class song_finder(object):
 
     def JingleTime(self):
         jt = self.jt
-        if jt['timelast'] + jt['min'] < datetime.datetime.now():
-            if jt['count'] >= 10 or jt['max'] + jt['timelast'] < datetime.datetime.now():
+        if jt['timelast'] + jt['min'] < datetime.now():
+            if jt['count'] >= 10 or jt['max'] + jt['timelast'] < datetime.now():
                 jt['count'] = 0
-                jt['timelast'] = datetime.datetime.now()
+                jt['timelast'] = datetime.now()
                 S = Song.objects.filter(status='J')
                 S = self.select_random(S)
                 self.log.debug("JingleTime! ID %s" % S.id)
@@ -198,8 +199,8 @@ class song_finder(object):
     def tweet(self, user, password, message):
         if len(message) < 140:
             url = 'http://twitter.com/statuses/update.xml'
-            curl = 'curl --connect-timeout 10 -s -u %s:%s -d status="%s" %s' % (user,password,message,url)
+            curl = 'curl --connect-timeout 10 -s -u %s:%s -d status="%s" %s' % (user, password, message, url)
             try:
-                pipe=popen(curl, 'r')
+                popen(curl, 'r')
             except:
                 self.log.warning("Failed To Tweet: %s"% message)

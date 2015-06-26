@@ -46,7 +46,7 @@ class SongMetaAdmin(admin.ModelAdmin):
     list_filter = ['checked', 'active']
     filter_horizontal = ['artists', 'groups', 'labels']
     date_hierarchy = 'added'
-    exclude = ["active", "user", "song"]
+    exclude = ["active"]
 
 class SongAdmin(admin.ModelAdmin):
     list_display = ['title', 'status', 'artist', 'uploader', 'bitrate', 'added', 'explicit']
@@ -56,7 +56,7 @@ class SongAdmin(admin.ModelAdmin):
     fieldsets = [
         ("General"        ,{ 'fields' : ['title', 'file', 'explicit', 'status', 'license']}),
         ("Technical Stuff"    ,{ 'fields' : ['song_length', 'bitrate','samplerate','replay_gain']}),
-        ("Playback"    ,{ 'fields' : ['loopfade_time', "playback_fadeout", "playback_bass_mode", "playback_bass_inter", "playback_bass_ramp",]}),
+        ("Playback"    ,{ 'fields' : ['loopfade_time', "playback_fadeout", "playback_bass_mode", "playback_bass_inter", "playback_bass_ramp", "playback_bass_mix",]}),
     ]
     inlines = [DownloadInline, SongLinkInline]
     date_hierarchy = 'added'
@@ -102,7 +102,7 @@ class CompilationAdmin(admin.ModelAdmin):
     raw_id_fields = ["prod_artists", "prod_groups"]
     exclude = ["cover_art"]
     inlines = [
-        CompilationSongInline, 
+        CompilationSongInline,
     ]
 
 class LabelAdmin(admin.ModelAdmin):
@@ -136,6 +136,10 @@ class GBLAdmin(admin.ModelAdmin):
     list_filter = ['linktype']
     search_fields = ['name', 'link']
 
+class ThemeAdmin(admin.ModelAdmin):
+    list_display = ['title', 'creator', "active"]
+    list_filter = ['active', "default"]
+
 class LicenseAdmin(admin.ModelAdmin):
     list_display = ['name', 'downloadable']
     list_filter = ['downloadable']
@@ -143,7 +147,8 @@ class LicenseAdmin(admin.ModelAdmin):
 
 class ObjLogAdmin(admin.ModelAdmin):
     list_display = ['obj', 'user', "content_type", "added", "text"]
-    search_fields = ['user__username', "text"]
+    search_fields = ['user__username', "text", "extra"]
+    list_filter = ['user__is_staff']
     date_hierarchy = 'added'
 
 admin.site.register(Group, GroupAdmin)
@@ -151,7 +156,7 @@ admin.site.register(Song, SongAdmin)
 admin.site.register(SongLicense, LicenseAdmin)
 admin.site.register(SongType)
 admin.site.register(ObjectLog, ObjLogAdmin)
-admin.site.register(Theme)
+admin.site.register(Theme, ThemeAdmin)
 admin.site.register(RadioStream, RadioStreamAdmin)
 admin.site.register(News, NewsAdmin)
 admin.site.register(Artist, ArtistAdmin)
@@ -165,6 +170,7 @@ admin.site.register(Compilation, CompilationAdmin)
 admin.site.register(Label, LabelAdmin)
 admin.site.register(Link, LinkAdmin)
 admin.site.register(LinkCategory)
+admin.site.register(OnelinerMuted)
 admin.site.register(Faq, FaqAdmin)
 admin.site.register(Screenshot, ScreenshotAdmin)
 admin.site.register(SongMetaData, SongMetaAdmin)

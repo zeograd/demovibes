@@ -27,8 +27,18 @@
 	<td></td>
 </tr>
 <tr>
-	<td>clickAndWait</td>
-	<td>link=Add To Favorites</td>
+	<td>verifyTextPresent</td>
+	<td>A total of 0 users have this song on their favourites list.</td>
+	<td></td>
+</tr>
+<tr>
+	<td>verifyTextPresent</td>
+	<td>Add to your favorite list</td>
+	<td></td>
+</tr>
+<tr>
+	<td>click</td>
+	<td>//div[2]/div/form/input[3]</td>
 	<td></td>
 </tr>
 <tr>
@@ -47,8 +57,13 @@
 	<td></td>
 </tr>
 <tr>
-	<td>assertTextPresent</td>
-	<td>Already In Your Favourites List!</td>
+	<td>verifyTextPresent</td>
+	<td>A total of 1 users have this song on their favourites list.</td>
+	<td></td>
+</tr>
+<tr>
+	<td>verifyTextPresent</td>
+	<td>Remove from your favorite list!</td>
 	<td></td>
 </tr>
 <tr>
@@ -57,8 +72,13 @@
 	<td></td>
 </tr>
 <tr>
+	<td>click</td>
+	<td>//td[8]/div/form/input[3]</td>
+	<td></td>
+</tr>
+<tr>
 	<td>clickAndWait</td>
-	<td>//img[@alt='Remove From Favorites']</td>
+	<td>link=My Favourites</td>
 	<td></td>
 </tr>
 <tr>
@@ -73,12 +93,52 @@
 </tr>
 <tr>
 	<td>clickAndWait</td>
-	<td>//table[@id='fd-table-1']/tbody/tr[7]/td[1]/a</td>
+	<td>link=retrorespect</td>
+	<td></td>
+</tr>
+<tr>
+	<td>click</td>
+	<td>//div[2]/div/form/input[3]</td>
 	<td></td>
 </tr>
 <tr>
 	<td>clickAndWait</td>
-	<td>link=Add To Favorites</td>
+	<td>link=My Favourites</td>
+	<td></td>
+</tr>
+<tr>
+	<td>verifyElementPresent</td>
+	<td>link=retrorespect</td>
+	<td></td>
+</tr>
+<tr>
+	<td>clickAndWait</td>
+	<td>link=Songs</td>
+	<td></td>
+</tr>
+<tr>
+	<td>clickAndWait</td>
+	<td>link=Monday monday test</td>
+	<td></td>
+</tr>
+<tr>
+	<td>verifyTextPresent</td>
+	<td>A total of 0 users have this song on their favourites list.</td>
+	<td></td>
+</tr>
+<tr>
+	<td>clickAndWait</td>
+	<td>link=terra</td>
+	<td></td>
+</tr>
+<tr>
+	<td>clickAndWait</td>
+	<td>link=Favourites List</td>
+	<td></td>
+</tr>
+<tr>
+	<td>verifyElementPresent</td>
+	<td>link=Symphony 1 part 3</td>
 	<td></td>
 </tr>
 </tbody></table>

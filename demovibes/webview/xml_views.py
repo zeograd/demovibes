@@ -1,9 +1,10 @@
 from demovibes.webview.models import *
-from demovibes.webview.common import get_now_playing_song
+from demovibes.webview.common import get_now_playing_song, ratelimit, make_oneliner_xml
 from django.shortcuts import render_to_response, get_object_or_404
 from django.template import RequestContext
 from mybaseview import MyBaseView
-
+from django.views.decorators.cache import cache_page
+from django.http import HttpResponse
 #
 # Note: Only the class based views use jinja templates.
 # The rest of the views use standard django templates
@@ -14,6 +15,8 @@ class XMLView(MyBaseView):
     content_type = "application/xml"
     basetemplate = 'webview/xml/'
 
+@ratelimit(20, 600) # 20 queries max per 10 minutes (average 1 query per 30 second)
+@cache_page(15)
 def queue(request):
     try :
         now_playing = get_now_playing_song()
@@ -28,16 +31,16 @@ def queue(request):
         {'now_playing': now_playing, 'history': history, 'queue': queue}, \
         context_instance=RequestContext(request), mimetype = "application/xml")
 
-def oneliner(request):
-    try:
-        oneliner_data = Oneliner.objects.select_related(depth=1).order_by('-id')[:20]
-    except:
-        return "Invalid Oneliner Data"
 
+
+def oneliner(request):
+    data = make_oneliner_xml()
+    return HttpResponse(data, content_type="application/xml")
     return render_to_response('webview/xml/oneliner.xml', \
         {'oneliner_data' : oneliner_data}, \
         context_instance=RequestContext(request), mimetype = "application/xml")
 
+@cache_page(60)
 def online(request):
     try:
         timefrom = datetime.datetime.now() - datetime.timedelta(minutes=5)

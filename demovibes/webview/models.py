@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from django.db import models
 from django.contrib.auth.models import User
+from django.contrib.auth.models import Group as UserGroup
 import datetime
 
 import re
@@ -16,7 +17,7 @@ from django.core.cache import cache
 from django.template.defaultfilters import striptags
 from django.contrib.sites.models import Site
 from django.template import Context, loader
-from django.db.models.signals import post_save
+from django.db.models.signals import post_save, pre_save
 from django.utils.translation import ugettext_lazy as _
 
 from django.contrib.contenttypes.models import ContentType
@@ -27,9 +28,32 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 import cStringIO
 from PIL import Image
 
+import protected_downloads
+
 import tagging
-import time, hashlib, urllib
-log = logging.getLogger("webview.models")
+import time, hashlib
+
+import random
+
+class TimeDelta(datetime.timedelta):
+
+    def total_seconds(self):
+        return (self.seconds + self.days * 24 * 3600)
+
+    def to_string(self):
+        s = self.total_seconds()
+        padding = ""
+        if s < 0:
+            s = s * -1
+            padding = "-"
+        hours, remainder = divmod(s, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        time1 = "%02d:%02d" % (minutes, seconds)
+        if hours:
+            return padding + "%s:" % hours + time1
+        return padding + time1
+
+log = logging.getLogger("dv.webview.models")
 
 CHEROKEE_SECRET = getattr(settings, "CHEROKEE_SECRET_DOWNLOAD_KEY", "")
 CHEROKEE_PATH = getattr(settings, "CHEROKEE_SECRET_DOWNLOAD_PATH", "")
@@ -37,60 +61,24 @@ CHEROKEE_REGEX = getattr(settings, "CHEROKEE_SECRET_DOWNLOAD_REGEX", "")
 CHEROKEE_LIMIT = getattr(settings, "CHEROKEE_SECRET_DOWNLOAD_LIMIT", "")
 CHEROKEE_LIMIT_URL = getattr(settings, "CHEROKEE_SECRET_DOWNLOAD_LIMIT_URL", "")
 
+NEWUSER_MUTE_TIME = getattr(settings, "NEW_USER_MUTE_TIME", None)
+
 SELFVOTE_DISABLED = getattr(settings, "SONG_SELFVOTE_DISABLED", False)
+SONG_LOCKTIME_FUNCTION = getattr(settings, "SONG_LOCKTIME_FUNCTION", None)
 
-def download_limit_reached(user):
-    limits = get_cherokee_limit(user)
-    if limits:
-        key = "urlgenlimit_%s" % user.id
-        k = cache.get(key, 0)
-        if k > limits.get("number"):
-            return True
+def get_now_playing_song(create_new=False):
+    queueobj = cache.get("nowplaysong")
+    if not queueobj or create_new:
+        try:
+            timelimit = datetime.datetime.now() - datetime.timedelta(hours=6)
 
-def get_cherokee_limit(user):
-    r = {}
-    if CHEROKEE_LIMIT and user and user.is_authenticated():
-        if CHEROKEE_LIMIT.get("default"):
-            L = CHEROKEE_LIMIT.get("default")
-        else:
-            L = CHEROKEE_LIMIT
-        if user.is_superuser and CHEROKEE_LIMIT.get("admin"):
-            L = CHEROKEE_LIMIT.get("admin")
-        elif user.is_staff and CHEROKEE_LIMIT.get("staff"):
-            L = CHEROKEE_LIMIT.get("staff")
-        for group in user.groups.all():
-            gn = CHEROKEE_LIMIT.get(group.name)
-            if gn:
-                if gn.get("seconds") >= L.get("seconds") and gn.get("number") >= L.get("number"):
-                    L = gn
-        r['seconds'] = L.get("seconds", 60*60*24)
-        r['number'] = L.get("number", 0)
-    return r
-
-def secure_download (url, user=None):
-    if CHEROKEE_SECRET:
-        url = urllib.unquote(url)
-        limits = get_cherokee_limit(user)
-        if limits:
-            key = "urlgenlimit_%s" % user.id
-            try:
-                k = cache.incr(key)
-            except:
-                k = 1
-                cache.set(key, k, limits.get("seconds"))
-            if k > limits.get("number"):
-                return CHEROKEE_LIMIT_URL or " Limit reached"
-        t = '%08x' % (time.time())
-        if CHEROKEE_REGEX:
-            try:
-                url = str(url)
-            except:
-                url = url.encode("utf8")
-            url = re.sub(*CHEROKEE_REGEX + (url,))
-        mu = CHEROKEE_PATH + "/%s/%s/%s" % (hashlib.md5(CHEROKEE_SECRET + "/" + url + t).hexdigest(), t, url)
-        return mu.decode("utf8")
-        #return mu
-    return url
+            queueobj = Queue.objects.select_related(depth=3).filter(played=True).filter(time_played__gt = timelimit).order_by('-time_played')[0]
+            log.debug("Checking now playing song : Time limit is %s", timelimit)
+        except:
+            log.info("Could not find now_playing")
+            return False
+        cache.set("nowplaysong", queueobj, 300)
+    return queueobj
 
 if getattr(settings, "LOOKUP_COUNTRY", True):
     from demovibes.ip2cc import ip2cc
@@ -124,6 +112,14 @@ if nodejs_event_server:
     channel.exchange_declare(exchange='events',
                      type='fanout')
 
+def send_notification(message, user, category = 0):
+    d = {
+        "message": message,
+        "category": category,
+    }
+    data = simplejson.dumps(d)
+    add_event("msg:%s" % data, user)
+
 def add_event(event = None, user = None, eventlist = [], metadata = {}):
     """
     Add event(s) to the event handler(s)
@@ -131,10 +127,14 @@ def add_event(event = None, user = None, eventlist = [], metadata = {}):
     Keywords:
     event -- string that will be sent to clients
     user -- optional -- User to receive the event
-    eventlist -- List of events to process
+    eventlist -- List of event strings to process
+    metadata -- Optional metadata to send along
 
     Either event or eventlist must be supplied
     """
+
+    cache.delete("curr_event")
+
     if not event and not eventlist:
         return False
 
@@ -157,14 +157,14 @@ def add_event(event = None, user = None, eventlist = [], metadata = {}):
                       body=e)
 
     if uwsgi_event_server:
-        R = AjaxEvent.objects.filter(user__isnull=True).order_by('-id')[:20] #Should have time based limit here..
-        R = [(x.id, x.event) for x in R]
-        data = (R, ae.id+1)
+        R = AjaxEvent.objects.order_by('-id')[:20] #Should have time based limit here..
+        R = [(x.id, x.event, x.user and x.user.id or "N") for x in R]
+        data = (R, ae.id)
         if uwsgi_event_server:
             if uwsgi_event_server == "HTTP":
                 data = {'data': pickle.dumps(data)}
                 data = urllib.urlencode(data)
-                logging.debug("Event data via http: %s" % data)
+                log.debug("Event data via http: %s" % data)
                 url = uwsgi_event_server_http or "http://127.0.0.1/demovibes/ajax/monitor/new/"
                 try:
                     r = urllib.urlopen(url, data)
@@ -174,7 +174,7 @@ def add_event(event = None, user = None, eventlist = [], metadata = {}):
             else:
                 uwsgi.send_uwsgi_message(uwsgi_event_server[0], uwsgi_event_server[1], 33, 17, data, 30)
 
-from managers import *
+from managers import LockingManager, ActiveSongManager
 
 # Create your models here.
 
@@ -275,6 +275,13 @@ class GenericLink(models.Model):
     comment = models.TextField(blank=True)
     user = models.ForeignKey(User, blank=True, null=True)
 
+    def log(self, user, message):
+        return ObjectLog.objects.create(obj=self, user=user, text=message)
+
+    def get_logs(self):
+        obj_type = ContentType.objects.get_for_model(self)
+        return ObjectLog.objects.filter(content_type__pk=obj_type.id, object_id=self.id)
+
     def __unicode__(self):
         return u"%s for %s" % (self.link, self.content_object)
 
@@ -295,12 +302,52 @@ class GroupVote(models.Model):
 
 class Theme(models.Model):
     title = models.CharField(max_length = 20)
+    active = models.BooleanField(default=True)
     description = models.TextField(blank=True)
-    preview = models.ImageField(upload_to='media/theme_preview', blank = True, null = True)
     css = models.CharField(max_length=120)
+    default = models.BooleanField(default=False)
+    creator = models.ForeignKey(User, blank=True, null=True)
+
+    screenshots = generic.GenericRelation("ScreenshotObjectLink")
+
+    def is_active_for(self, user):
+        if user and user.is_authenticated():
+            t = user.get_profile().theme
+            if t:
+                return t == self
+        return self.default
+
+    def get_main_screenshot(self):
+        r = self.get_screenshots().order_by("-id")
+        if r:
+            return r[0]
+
+    class Meta:
+        ordering = ["-default", 'title']
+
+    def is_local(self):
+        return not self.css.lower().startswith("http")
+
+    def get_screenshots(self):
+        """
+        Return all active screenshots
+        """
+        return self.screenshots.filter(image__status='A').order_by("-is_main")
 
     def __unicode__(self):
+        if self.default:
+            return self.title + " (Default)"
         return self.title
+
+    @models.permalink
+    def get_absolute_url(self):
+        return ('dv-themeinfo', [str(self.id)])
+
+def saveTheme(sender, **kwargs):
+    instance = kwargs.get("instance")
+    if instance.default:
+        Theme.objects.all().update(default=False)
+pre_save.connect(saveTheme, sender=Theme)
 
 class Userprofile(models.Model):
     VISIBLE_TO = (
@@ -308,13 +355,7 @@ class Userprofile(models.Model):
         ('R', 'Registrered users'),
         ('N', 'No one')
     )
-
-    def have_artist(self):
-        try:
-            return self.user.artist
-        except:
-            return False
-
+    last_ip = models.IPAddressField(blank=True, default="")
     aol_id = models.CharField(blank = True, max_length = 40, verbose_name = "AOL IM", help_text="AOL IM ID, for people to contact you (optional)")
     avatar = models.ImageField(upload_to = 'media/avatars', blank = True, null = True)
     country = models.CharField(blank = True, max_length = 10, verbose_name = "Country code")
@@ -346,8 +387,43 @@ class Userprofile(models.Model):
     visible_to = models.CharField(max_length=1, default = "A", choices = VISIBLE_TO)
     web_page = models.URLField(blank = True, verbose_name="Website", help_text="Your personal website address. Must be a valid URL")
     yahoo_id = models.CharField(blank = True, max_length = 40, verbose_name = "Yahoo! ID", help_text="Yahoo! IM ID, for people to contact you (optional)")
-
+    
+    hellbanned = models.BooleanField(default=False)
+    
     links = generic.GenericRelation(GenericLink)
+
+    def is_hellbanned(self):
+        return self.hellbanned
+
+    def is_muted(self):
+        f = models.Q(user=self.user)
+        if self.last_ip:
+            f = f | models.Q(ip_ban=self.last_ip)
+        r = OnelinerMuted.objects.filter(f, muted_to__gt=datetime.datetime.now())
+        if r:
+            d = {
+                "reason": r[0].reason,
+                "time": r[0].muted_to,
+            }
+            r[0].hits = r[0].hits + 1
+            r[0].save()
+            return d
+        if NEWUSER_MUTE_TIME:
+            r =self.user.date_joined + NEWUSER_MUTE_TIME
+            if r > datetime.datetime.now():
+                d = {
+                    "reason": "New account",
+                    "time": r,
+                }
+                return d
+        return False
+
+    def log(self, user, message):
+        return ObjectLog.objects.create(obj=self, user=user, text=message)
+
+    def get_logs(self):
+        obj_type = ContentType.objects.get_for_model(self)
+        return ObjectLog.objects.filter(content_type__pk=obj_type.id, object_id=self.id)
 
     def set_flag_from_ip(self, ip):
         if ipccdb and not self.country:
@@ -415,13 +491,12 @@ class Userprofile(models.Model):
 
     def get_css(self):
         """
-        Return custom user CSS url or site default CSS url
+        Return custom user CSS url or None
         """
         if self.custom_css:
             return self.custom_css
         if self.theme:
             return self.theme.css
-        return getattr(settings, 'DEFAULT_CSS', "%sthemes/default/style.css" % settings.MEDIA_URL)
 
     def get_stat(self):
         """
@@ -566,6 +641,7 @@ class Artist(models.Model):
     twitter_id = models.CharField(blank = True, max_length = 32, verbose_name = "Twitter ID", help_text="Enter the Twitter account name of the artist, if known (without the Twitter URL)")
     webpage = models.URLField(blank=True, verbose_name="Website", help_text="Website for this artist. Must exist on the web.")
     wiki_link = models.URLField(blank=True, help_text="URL to Wikipedia entry (if available)")
+    scene_relevance = models.TextField(blank=True, help_text="The artist's demoscene relevance. So the mods can approve it faster")
 
     links = generic.GenericRelation(GenericLink)
 
@@ -713,6 +789,11 @@ class Screenshot(models.Model):
         self.last_updated = datetime.datetime.now()
         return super(Screenshot, self).save(*args, **kwargs)
 
+    def get_thumb_url(self):
+        if not self.thumbnail:
+            self.create_thumbnail()
+        return self.thumbnail and self.thumbnail.url or ""
+
     def get_objects(self):
         return self.screenshotobjectlink_set.all()
 
@@ -726,32 +807,44 @@ class Screenshot(models.Model):
           return None
 
         # Some variables used for scaling
-        thumbwidth = getattr(settings, 'SCREEN_DISPLAY_WIDTH', 100)
-        thumbheight = getattr(settings, 'SCREEN_DISPLAY_HEIGHT', 100)
-        quality = getattr(settings, 'SCREEN_SCALE_QUALITY', 70)
-        format = getattr(settings, 'SCREEN_SCALE_FORMAT', 'jpeg')
+        thumbwidth = getattr(settings, 'THUMB_DISPLAY_WIDTH', 100)
+        thumbheight = getattr(settings, 'THUMB_DISPLAY_HEIGHT', 100)
+        quality = getattr(settings, 'SCREEN_SCALE_QUALITY', 80)
+        format = getattr(settings, 'SCREEN_SCALE_FORMAT', 'png') # jpeg is not always readily available in PIL
 
         res = cStringIO.StringIO()
-        size=(thumbwidth, thumbheight)
+        size = (thumbwidth, thumbheight)
+        outfile = os.path.splitext(self.image.path)[0] + "." + format # Generate a saved file, with extension change
 
         img = Image.open(self.image.path)
-        img.thumbnail(size, Image.ANTIALIAS)
 
         if img.mode != "RGB":
             img = img.convert("RGB")
 
-        img.save(res, format, quality=quality) # Dump the scaled image to a buffer
+        img.thumbnail (size, Image.ANTIALIAS)
+
+        if format == 'png':
+            img.save(res, 'PNG', quality=quality, optimize=True, progressive=True) # Dump the scaled image to a PNG buffer
+        elif format == 'jpg' or format == 'jpg':
+            img.save(res, 'JPEG', quality=quality, optimize=True, progressive=True) # Dump the scaled image to a JPEG buffer
+        else:
+            img.save(res, format, quality=quality) # Dump the scaled image to a buffer designated by default
+
         res.seek(0) # Move pointer back to the beginning of the buffer
-        thumb = SimpleUploadedFile(os.path.basename(self.image.path), res.read()) # Save it somewhere on the disk
-        self.thumbnail.save(os.path.basename(self.image.path), thumb, save=True) # Save it in the model
+        thumb = SimpleUploadedFile(os.path.basename(outfile), res.read()) # Save it somewhere on the disk
+        self.thumbnail.save (os.path.basename(outfile), thumb, save=True) # Save it in the model
 
     @models.permalink
     def get_absolute_url(self):
         return ('dv-screenshot', [str(self.id)])
 
+    def is_active(self):
+        return self.status == 'A'
+
 class ScreenshotObjectLink(models.Model):
     content_type = models.ForeignKey(ContentType)
     object_id = models.PositiveIntegerField()
+    is_main = models.BooleanField(default=False)
     obj = generic.GenericForeignKey('content_type', 'object_id')
 
     image = models.ForeignKey(Screenshot)
@@ -827,6 +920,7 @@ class ObjectLog(models.Model):
     user = models.ForeignKey(User)
     added = models.DateTimeField(default=datetime.datetime.now())
     text = models.TextField()
+    extra = models.TextField(blank=True)
 
     def __unicode__(self):
         return unicode(self.obj)
@@ -873,9 +967,14 @@ class Song(models.Model):
     locked_until = models.DateTimeField(blank = True, null = True)
     loopfade_time = models.PositiveIntegerField(default = 0, verbose_name = "Forced play time", help_text = "In seconds, 0 = disabled")
     playback_fadeout = models.BooleanField(default=True, verbose_name = "Fadeout at end", help_text = "Only active if Forced play time is set")
-    playback_bass_mode = models.CharField(max_length=3, choices=(("pt1", "ProTracker 1"), ("ft2", "FastTracker2")), blank = True, verbose_name = "Playback mode")
+    playback_bass_mode = models.CharField(max_length=4, choices=(
+            ("pt1", "ProTracker 1"),
+            ("ft2", "FastTracker2"),
+            ("bass", "Bass"),
+        ), blank = True, verbose_name = "Playback mode")
     playback_bass_inter = models.CharField(max_length=6, choices=(("off", "Off"), ("linear", "Linear"), ("sinc", "Sinc")), blank = True, verbose_name = "Playback interpolation")
-    playback_bass_ramp = models.CharField(max_length=3, choices=(("off", "Off"), ("normal", "Normal"), ("sensitive", "Sensitive")), blank = True, verbose_name = "Playback RAMPAGE!")
+    playback_bass_mix = models.CharField(max_length=4, choices=(("Auto", "auto"), ("0.0", "Off"), ("0.3", "Mix"), ("0.5", "Mono")), blank = True, verbose_name = "Playback Mix")
+    playback_bass_ramp = models.CharField(max_length=10, choices=(("off", "Off"), ("normal", "Normal"), ("sensitive", "Sensitive")), blank = True, verbose_name = "Playback RAMPAGE!")
     num_favorited = models.IntegerField(default = 0)
     rating = models.FloatField(blank = True, null = True)
     rating_total = models.IntegerField(default = 0)
@@ -903,6 +1002,37 @@ class Song(models.Model):
     #def display(self):
     #    return "song"
 
+    def create_lock_time(self):
+        log.debug("Starting locktime calculation for %s", self)
+        sl = settings.SONG_LOCK_TIME
+        time = datetime.timedelta(**sl)
+        log.debug("Base locktime is %s", time)
+
+
+        random_extra = getattr(settings, "SONG_LOCK_TIME_RANDOM", None)
+        if random_extra:
+            rnd = TimeDelta(**random_extra)
+            randomextra = datetime.timedelta(seconds = random.randint(0, rnd.total_seconds()))
+            time = time + randomextra
+            log.debug("Added random locktime: %s", randomextra)
+
+        vote_extra = getattr(settings, "SONG_LOCK_TIME_VOTE", None)
+        if vote_extra and self.rating:
+            log.debug("Adding extra locktime based on vote. Rating %.2f over %s votes", self.rating, self.rating_votes)
+            vote = TimeDelta(**vote_extra)
+            if SONG_LOCKTIME_FUNCTION:
+                log.debug("Running external function to determine vote lock..")
+                num = SONG_LOCKTIME_FUNCTION(self)
+            else:
+                vote_val = 5 - self.rating
+                num = vote_val / 4.0
+            secs = vote.total_seconds() * num
+            muhu = datetime.timedelta(seconds = int(vote.total_seconds() * num))
+            log.debug("Vote penalty number is %s, and added time is: %s", num, muhu)
+            time = time + muhu
+        log.debug("Lock time calculated to: %s", time)
+        return time
+
     def is_connected_to(self, user):
         if user and user.is_authenticated():
             up = user.get_profile()
@@ -912,15 +1042,17 @@ class Song(models.Model):
         return False
 
     def downloadable_by(self, user):
-        if user.is_authenticated() and not download_limit_reached(user):
+        if user.is_authenticated() and not protected_downloads.download_limit_reached(user):
             if user.is_staff:
                 return True
             if self.license and self.license.downloadable:
                 return True
         return False
 
-    def get_file_url(self, user=None):
-        return secure_download(self.file.url, user)
+    def get_download_url(self, user):
+        if self.downloadable_by(user):
+           return protected_downloads.get_song_url(self, user)
+        return False
 
     def has_video(self):
         return self.get_metadata().ytvidid
@@ -935,7 +1067,7 @@ class Song(models.Model):
         """
         Return all active download links
         """
-        return self.screenshots.filter(image__status='A')
+        return self.screenshots.filter(image__status='A').order_by("-is_main")
 
     def get_active_links(self):
         """
@@ -959,6 +1091,10 @@ class Song(models.Model):
     def get_absolute_url(self):
         return ("dv-song", [str(self.id)])
 
+    @models.permalink
+    def get_nginx_url(self):
+        return ("dv-dl-song", [str(self.id)])
+
     def get_playoptions(self):
         """
         Return options for playback
@@ -968,18 +1104,23 @@ class Song(models.Model):
         r['bass_inter'] = self.playback_bass_inter or "auto"
         r['bass_mode'] = self.playback_bass_mode or "auto"
         r['bass_ramp'] = self.playback_bass_ramp or "auto"
+        r['mix'] = self.playback_bass_mix or "auto"
 
         if self.loopfade_time:
             r['fade_out'] = self.playback_fadeout
             r['length'] = self.loopfade_time
         return r
 
+    def get_songlength(self):
+        return self.loopfade_time or self.song_length
+
     def length(self):
         """
         Returns song length in minutes:seconds format
         """
-        if self.song_length:
-            return "%d:%02d" % ( self.song_length/60, self.song_length % 60 )
+        r = self.get_songlength()
+        if r:
+            return "%d:%02d" % ( r/60, r % 60 )
         return "Not set"
 
     def log(self, user, message):
@@ -1031,7 +1172,7 @@ class Song(models.Model):
             self.samplerate = samplerate
             result = True
         except:
-            logging.warning("Missing pyMAD, and scan not configured")
+            log.warning("Missing pyMAD, and scan not configured")
             result = False
         return result
 
@@ -1110,15 +1251,17 @@ class Song(models.Model):
             desc1 = "%s by %s" % (title, aa)
             desc = "%s\nFetched from Pouet id [url=http://www.pouet.net/prod.php?which=%s]%s[/url]" % (desc1, self.get_pouetid(), self.get_pouetid())
 
-            s = Screenshot(name=title, description=desc)
-            s.image.save(os.path.basename(img_url), image, save=True)
+            Q = Screenshot.objects.filter(name=title, description__contains=self.get_pouetid())
+            if Q:
+                s = Q[0]
+            else:
+                s = Screenshot(name=title, description=desc)
+                s.image.save(os.path.basename(img_url), image, save=True)
+                s.save()
+                s.create_thumbnail()
+                s.save()
+
             ScreenshotObjectLink.objects.create(obj=self, image=s)
-            #s.save()
-            s.create_thumbnail()
-            s.save()
-
-            #self.thumbnail.save(os.path.basename(self.image.path), thumb, save=True) # Save it in the model
-
 
     def get_pouet_screenshot_img(self):
         """
@@ -1204,11 +1347,11 @@ class Song(models.Model):
 
         Note: This works on when it was queued, not played.
         """
-        logging.debug("Getting last queued time for song %s" % self.id)
+        log.debug("Getting last queued time for song %s" % self.id)
         key = "songlastplayed_%s" % self.id
         c = cache.get(key)
         if not c:
-            logging.debug("No cache for last queued, finding")
+            log.debug("No cache for last queued, finding")
             Q = Queue.objects.filter(song=self).order_by('-id')[:1]
             if not Q:
                 c = "Never"
@@ -1274,7 +1417,13 @@ class Song(models.Model):
             obj.save()
 
         self.save()
-        return True
+
+
+        currently_playing = get_now_playing_song()
+        if currently_playing and self == currently_playing.song:
+            add_event("vote:%.2f|%d" % (self.rating, self.rating_votes))
+            cache.delete("nowplaysong")
+        return obj
 
     def get_vote(self, user):
         """
@@ -1283,7 +1432,7 @@ class Song(models.Model):
         vote = SongVote.objects.filter(song=self, user=user)
         if vote:
             return vote[0].vote
-        return ""
+        return 0
 
 try:
     tagging.register(Song)
@@ -1361,7 +1510,7 @@ class Compilation(models.Model):
         """
         Return all active screenshots
         """
-        return self.screenshots.filter(image__status='A')
+        return self.screenshots.filter(image__status='A').order_by("-is_main")
 
     def get_master_screenshot(self):
         """
@@ -1495,7 +1644,7 @@ class Queue(models.Model):
         left = self.timeleft()
         if left < 1:
             return -1
-        offset = self.song.song_length + self.song.get_metadata().ytvidoffset - left
+        offset = self.song.get_songlength() + self.song.get_metadata().ytvidoffset - left
         return offset
 
     def timeleft(self):
@@ -1505,7 +1654,7 @@ class Queue(models.Model):
         if self.song.song_length == None or not self.played or not self.time_played:
             return 0
         delta = datetime.datetime.now() - self.time_played
-        return self.song.song_length - delta.seconds
+        return self.song.get_songlength() - delta.seconds
 
     def get_eta(self):
         """
@@ -1524,7 +1673,7 @@ class Queue(models.Model):
         if self.priority:
             if not self.playtime:
                 for q in baseq_lt.filter(priority = True):
-                    playtime = playtime + q.song.song_length
+                    playtime = playtime + q.song.get_songlength()
                 return datetime.datetime.now() + datetime.timedelta(seconds=playtime)
 
             else:
@@ -1537,14 +1686,14 @@ class Queue(models.Model):
                 q.song.set_song_data()
                 q.song.save()
             try:
-                playtime = playtime + q.song.song_length
+                playtime = playtime + q.song.get_songlength()
             except:
                 pass
         for q in baseq.filter(priority = True):
-            playtime = playtime + q.song.song_length
+            playtime = playtime + q.song.get_songlength()
         eta = datetime.datetime.now() + datetime.timedelta(seconds=playtime)
         for q in baseq.filter(playtime__lt = eta):
-            playtime = playtime + q.song.song_length
+            playtime = playtime + q.song.get_songlength()
         eta = datetime.datetime.now() + datetime.timedelta(seconds=playtime)
         if self.playtime and self.playtime > eta:
             return self.playtime
@@ -1562,9 +1711,13 @@ class SongComment(models.Model):
     comment = models.TextField()
     staff_comment = models.BooleanField(default=False, verbose_name = "Staff only")
     added = models.DateTimeField(auto_now_add=True)
-
+    
+    def is_visible(self):
+        return True
+    
     def __unicode__(self):
         return self.comment
+        
     class Meta:
         ordering = ['-added']
 
@@ -1592,10 +1745,36 @@ class Favorite(models.Model):
         self.song.save()
         return super(Favorite, self).delete()
 
+class OnelinerMuted(models.Model):
+    reason = models.CharField(max_length=20)
+    user = models.ForeignKey(User)
+    added = models.DateTimeField(auto_now_add=True)
+    added_by = models.ForeignKey(User, related_name="mutes")
+    details = models.TextField(blank=True)
+
+    hits = models.PositiveIntegerField(default=0)
+
+    ip_ban = models.IPAddressField(blank = True, default="")
+
+    muted_to = models.DateTimeField(db_index=True)
+
+    def __unicode__(self):
+        return u"Mute: %s" % self.user.username
+
+    class Meta:
+        ordering = ['-id']
+        permissions = (
+            ("add_mute_oneliner", "Can mute people in oneliner"),
+        )
+
 class Oneliner(models.Model):
     message = models.CharField(max_length=256)
     user = models.ForeignKey(User)
     added = models.DateTimeField(auto_now_add=True, db_index=True)
+    
+    def __unicode__(self):
+        return u"[%s] <%s> %s" % (self.added.strftime("%X"), self.user, self.message)
+
     class Meta:
         ordering = ['-added']
         permissions = (
@@ -1606,7 +1785,7 @@ class Oneliner(models.Model):
         return super(Oneliner, self).save(*args, **kwargs)
 
 class AjaxEvent(models.Model):
-    event = models.CharField(max_length=100)
+    event = models.CharField(max_length=200)
     user = models.ForeignKey(User, blank = True, null = True, default = None)
 
 class News(models.Model):
@@ -1626,6 +1805,9 @@ class News(models.Model):
 
     def __unicode__(self):
         return self.title
+
+    def is_new(self, hours=24):
+        return (datetime.datetime.now() - datetime.timedelta(hours=hours)) < self.added
 
     def save(self, *args, **kwargs):
         self.last_updated = datetime.datetime.now()
@@ -1668,7 +1850,12 @@ class PrivateMessage(models.Model):
         ordering = ['-sent']
 
     def __unicode__(self):
-        return self.subject
+        r = u" [To %s] %s" % (self.to, self.subject)
+        if not self.visible:
+            r = u"H" + r
+        if not self.unread:
+            r = u"R" + r
+        return r
 
     @models.permalink
     def get_absolute_url(self):
@@ -1687,7 +1874,8 @@ class PrivateMessage(models.Model):
 
         #Check if user have send pm on, and if its a new message
         profile = self.to.get_profile()
-        if self.pk == None and profile.email_on_pm:
+        
+        if self.pk == None and profile.email_on_pm and self.visible:
             mail_from = settings.DEFAULT_FROM_EMAIL
             mail_tpl = loader.get_template('webview/email/new_pm.txt')
             me = Site.objects.get_current()
@@ -1825,7 +2013,6 @@ class SongLicense(models.Model):
     def __unicode__(self):
         return self.name
 
-
 def create_profile(sender, **kwargs):
     """
     Create profile entry for new user
@@ -1839,6 +2026,19 @@ def create_profile(sender, **kwargs):
         except:
             pass
 post_save.connect(create_profile, sender=User)
+
+def post_process_profile(sender, **kwargs):
+    if kwargs["created"]:
+        user = kwargs["instance"]
+        data = {"user": user, "groupmodel": UserGroup}
+        funcs = getattr(settings, "NEWUSER_FUNCTIONS", [])
+        for x in funcs:
+            try:
+                x(data)
+            except:
+                log.exception("Could not run post_process on new user %s", user)
+                
+post_save.connect(post_process_profile, sender=User)
 
 def set_song_values(sender, **kwargs):
     song = kwargs["instance"]

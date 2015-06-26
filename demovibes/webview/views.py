@@ -1,13 +1,16 @@
-from webview.models import *
-from webview.forms import *
+from webview import models as m
+from webview import forms as f
 from webview import common
-
+from django.utils.html import escape
 from openid_provider.models import TrustedRoot
 
 from mybaseview import MyBaseView
 
+from django.db import DatabaseError
+
 from tagging.models import TaggedItem
 import tagging.utils
+from django.template import Context, loader
 
 from django.utils.translation import ugettext as _
 from django.http import HttpResponseRedirect, HttpResponseNotFound, HttpResponse
@@ -23,15 +26,16 @@ from django.core.cache import cache
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.auth import authenticate, login
 
-import logging
+import logging, datetime
 
 import j2shim
 import hashlib
 import re
 import random
+import urllib2
 # Create your views here.
 
-L = logging.getLogger('webview.views')
+L = logging.getLogger('dv.webview.views')
 
 class WebView(MyBaseView):
     basetemplate = "webview/"
@@ -40,18 +44,17 @@ class SongView(WebView):
 
     def initialize(self):
         songid = self.kwargs['song_id']
-        self.context['song'] = self.song = get_object_or_404(Song, id=songid)
+        self.context['song'] = self.song = get_object_or_404(m.Song, id=songid)
 
 class SongAddScreenshot(SongView):
-
     def GET(self):
         return create_screenshot(self.request, self.song)
-        
+
 class CompilationView(WebView):
 
     def initialize(self):
         compid = self.kwargs['compilation_id']
-        self.context['compilation'] = self.compilation = get_object_or_404(Compilation, id=compid)
+        self.context['compilation'] = self.compilation = get_object_or_404(m.Compilation, id=compid)
 
 class CompilationAddScreenshot(CompilationView):
 
@@ -61,7 +64,7 @@ class CompilationAddScreenshot(CompilationView):
 class ProfileView(WebView):
     def initialize(self):
         username = self.kwargs['user']
-        self.user = get_object_or_404(User, username = username)
+        self.user = get_object_or_404(m.User, username = username)
         self.profile = common.get_profile(self.user)
 
     def check_permissions(self):
@@ -80,11 +83,11 @@ class ListByLetter(WebView):
 
     def initialize(self):
         letter = self.kwargs.get("letter", False)
-        if letter and not letter in alphalist or letter == '-':
+        if letter and not letter in m.alphalist or letter == '-':
             letter = '#'
         self.letter = letter
         self.context['letter'] = letter
-        self.context['al'] = alphalist
+        self.context['al'] = m.alphalist
 
     def set_context(self):
         if self.model:
@@ -95,7 +98,60 @@ class ListByLetter(WebView):
             return {'object_list': results }
         return {}
 
+class AjaxifyView(WebView):
+    redirect_to = "dv-root"
+
+    def GET(self):
+        if not self.request.is_ajax():
+            self.redirect(self.redirect_to)
+        return HttpResponse("")
+
+    def make_ajax_return(self):
+        return HttpResponse("You forgot to define 'make_ajax_return', mate!")
+
+    def POST(self):
+        if not self.request.user.is_authenticated():
+            if self.request.is_ajax():
+                return HttpResponse("")
+            return self.redirect("/account/signin/")
+        songid = self.request.POST.get("songid")
+        if songid:
+            self.song = m.Song.objects.get(id = songid)
+
+        self.handle_form(self.request.POST)
+
+        if self.request.is_ajax():
+            return self.make_ajax_return()
+
+        self.redirect(self.request.META.get('HTTP_REFERER') or self.redirect_to)
+
+
+def check_muted(request):
+    profile = request.user.get_profile()
+    muted = profile.is_muted()
+    if muted:
+        return j2shim.r2r('webview/muted.html', {'muted' : muted}, request)
+
 #-------------------------------------------------------
+
+class ListSmileys(WebView):
+    template = "smileys.html"
+    def set_context(self):
+        return {'smileys': settings.SMILEYS}
+
+
+class DownloadSong(SongView):
+    def check_permissions(self):
+        return self.song.downloadable_by(self.request.user)
+
+    def GET(self):
+        response = HttpResponse()
+        m.protected_downloads.increase_downloads_for(self.request.user)
+        response['Content-Type'] = ''
+        theurl = urllib2.unquote(self.song.file.url).encode("utf8")
+        L.debug("Download for song %s - url is %s", self.song, theurl)
+        response['X-Accel-Redirect'] = theurl
+        return response
 
 class PlaySong(SongView):
     template="playsong.html"
@@ -104,19 +160,15 @@ class PlaySong(SongView):
         return self.song.downloadable_by(self.request.user)
 
     def set_context(self):
-        limit = None
-        if CHEROKEE_SECRET:
-            key = "urlgenlimit_%s" % self.request.user.id
-            number = get_cherokee_limit(self.request.user).get("number",0)
-            limit = number - cache.get(key, 0)
+        limit, total = m.protected_downloads.get_current_download_limits_for(self.request.user)
         self.song.log(self.request.user, "Song preview / download")
-        return {'song': self.song, 'limit': limit}
+        return {'song': self.song, 'limit': limit, 'total': total}
 
 class AddCompilation(WebView):
     template = "add_compilation.html"
     login_required = True
     forms = [
-        (CreateCompilationForm, "compform"),
+        (f.CreateCompilationForm, "compform"),
     ]
 
     action = "created"
@@ -129,6 +181,7 @@ class AddCompilation(WebView):
         if not newcf.id:
             newcf.created_by = self.request.user
             newcf.status = "U"
+        newcf.last_updated = datetime.datetime.now() # Fixes bug of new compilations not appearing in Recent Updates
         newcf.save()
         compdata.save_m2m()
 
@@ -137,7 +190,7 @@ class AddCompilation(WebView):
         newcf.reset_songs()
         for index, S in enumerate(songs):
             newcf.add_song(S, index)
-            playtime = playtime + S.song_length
+            playtime = playtime + S.get_songlength()
             for a in S.get_metadata().artists.all():
                 if a not in artists:
                     artists.append(a)
@@ -158,7 +211,7 @@ class AddCompilation(WebView):
                 # By default songsinput is empty but in fact we have one entry in list (u'')
                 # So the code will goes here ... but not valid S
                 if S:
-                    songs.append(Song.objects.get(id=S))
+                    songs.append(m.Song.objects.get(id=S))
 
         if self.forms_valid and songs:
             newcf = self.save_compilation(self.context["compform"], songs)
@@ -170,7 +223,7 @@ class EditCompilation(AddCompilation):
 
     def form_compform_init(self):
         ci = self.kwargs.get("comp_id")
-        self.c = Compilation.objects.get(id=ci)
+        self.c = m.Compilation.objects.get(id=ci)
         return {'instance': self.c}
 
     def post_view(self):
@@ -191,21 +244,21 @@ def inbox(request):
     if delete:
         try:
             delpm = int(delete)
-            pm = PrivateMessage.objects.get(pk = delpm, to = request.user)
+            pm = m.PrivateMessage.objects.get(pk = delpm, to = request.user)
         except:
             return HttpResponseNotFound()
         pm.visible = False
         pm.save()
     if pms == "sent":
-        mails = PrivateMessage.objects.filter(sender = request.user, visible = True)
+        mails = m.PrivateMessage.objects.filter(sender = request.user, visible = True)
     else:
         pms = "received" #to remove injects
-        mails = PrivateMessage.objects.filter(to = request.user, visible = True)
+        mails = m.PrivateMessage.objects.filter(to = request.user, visible = True)
     return j2shim.r2r('webview/inbox.html', {'mails' : mails, 'pms': pms}, request=request)
 
 @login_required
 def read_pm(request, pm_id):
-    pm = get_object_or_404(PrivateMessage, id = pm_id)
+    pm = get_object_or_404(m.PrivateMessage, id = pm_id)
     if pm.to == request.user:
         pm.unread = False
         pm.save()
@@ -216,38 +269,29 @@ def read_pm(request, pm_id):
 
 @login_required
 def send_pm(request):
+    r = check_muted(request)
+    if r: return r
+
     if request.method == 'POST':
-        form = PmForm(request.POST)
+        form = f.PmForm(request.POST)
         if form.is_valid():
             F = form.save(commit=False)
-            F.sender=request.user
+            F.sender = request.user
+            if request.user.get_profile().is_hellbanned():
+                F.visible = False
             F.save()
+            if F.visible:
+                m.send_notification("%s sent you a <a href='%s'>message</a> with title '%s'" % (escape(F.sender.username), F.get_absolute_url(), escape(F.subject)), F.to)
             return HttpResponseRedirect(reverse('dv-inbox'))
     else:
         title = request.GET.get('title', "")
         to = request.GET.get('to', "")
         try:
-            U = User.objects.get(username=to)
+            U = m.User.objects.get(username=to)
         except:
             U = None
-        form = PmForm(initial= {'to': U, 'subject' : title})
+        form = f.PmForm(initial= {'to': U, 'subject' : title})
     return j2shim.r2r('webview/pm_send.html', {'form' : form}, request)
-
-class AddQueue(SongView):
-    """
-    Add a song to the queue
-    """
-    template = "song_queued.html"
-    login_required = True
-
-    def GET(self):
-        ref = self.request.META.get('HTTP_REFERER', False)
-        url = self.song.get_absolute_url()
-        if not self.request.is_ajax() and ref and not ref.endswith(url):
-            return self.redirect(url)
-        common.queue_song(self.song, self.request.user)
-        if self.request.is_ajax():
-            return HttpResponse("OK")
 
 class addComment(SongView):
     """
@@ -259,9 +303,14 @@ class addComment(SongView):
         self.redirect(self.song)
 
     def POST(self):
+        r = check_muted(self.request)
+        if r: return r
+
         comment = self.request.POST.get("Comment", "").strip()
         if comment:
-            SongComment.objects.create(comment = comment, song = self.song, user = self.request.user)
+            m.SongComment.objects.create(comment = comment, song = self.song, user = self.request.user)
+            if getattr(settings, "NOTIFY_NEW_SONG_COMMENT", False):
+                m.send_notification("%s commented on the song <a href='%s'>%s</a>" % (escape(self.request.user.username), self.song.get_absolute_url(), escape(self.song.title)), None, 2)
 
 def site_about(request):
     """
@@ -290,15 +339,15 @@ class listQueue(WebView):
         }
 
 def list_song(request, song_id):
-    song = get_object_or_404(Song, id=song_id)
+    song = get_object_or_404(m.Song, id=song_id)
 
     # We can now get any compilation data that this song is a part of
-    comps = Compilation.objects.filter(songs__id = song.id)
+    comps = m.Compilation.objects.filter(songs__id = song.id)
 
     # Has this song been remixed?
-    remix_list = SongMetaData.objects.filter(remix_of_id = song.id, active=True)
+    remix_list = m.SongMetaData.objects.filter(remix_of_id = song.id, active=True)
     remix = [d.song for d in remix_list]
-    related = Song.tagged.related_to(song)
+    related = m.Song.tagged.related_to(song)
     tags = song.tags
     t2 = []
     for tag in tags:
@@ -312,7 +361,7 @@ def list_song(request, song_id):
 
 # This can probbably be made a generic object
 def list_screenshot(request, screenshot_id):
-    screenshot = get_object_or_404(Screenshot, id=screenshot_id)
+    screenshot = get_object_or_404(m.Screenshot, id=screenshot_id)
     return j2shim.r2r('webview/screenshot_detail.html', { 'object' : screenshot }, request)
 
 class ViewUserFavs(ProfileView):
@@ -322,18 +371,18 @@ class ViewUserFavs(ProfileView):
     template = "user_favorites.html"
 
     def set_context(self):
-        favorites = Favorite.objects.filter(user = self.user)
+        favorites = m.Favorite.objects.filter(user = self.user)
         return {'favorites':favorites, 'favuser': self.user}
 
 class MyProfile(WebView):
     template = "my_profile.html"
     login_required = True
-    forms = [(ProfileForm, "form")]
+    forms = [(f.ProfileForm, "form")]
 
     def initialize(self):
         self.profile = common.get_profile(self.request.user)
         if self.profile.have_artist():
-            self.context['lic'] = LicenseForm()
+            self.context['lic'] = f.LicenseForm()
         self.links = LinkCheck("U", object = self.profile)
 
     def pre_view(self):
@@ -345,7 +394,7 @@ class MyProfile(WebView):
                 return self.redirect("dv-my_profile")
 
     def handle_artistedit(self):
-        L = LicenseForm(self.request.POST)
+        L = f.LicenseForm(self.request.POST)
         if L.is_valid():
             artist = self.request.user.artist
             lic = L.cleaned_data['license']
@@ -387,19 +436,19 @@ def search(request):
         searchterm = request.POST['Search']
         result_limit = getattr(settings, 'SEARCH_LIMIT', 40)
         if settings.USE_FULLTEXT_SEARCH == True:
-            users = User.objects.filter(username__search = searchterm)[:result_limit]
-            songs = Song.objects.select_related(depth=1).filter(title__search = searchterm)[:result_limit]
-            artists = Artist.objects.filter(handle__search = searchterm)|Artist.objects.filter(name__search = searchterm)[:result_limit]
-            groups = Group.objects.filter(name__search = searchterm)[:result_limit]
-            compilations = Compilation.objects.filter(name__search = searchterm)[:result_limit]
-            labels = Label.objects.filter(name__search = searchterm)[:result_limit]
+            users = m.User.objects.filter(username__search = searchterm)[:result_limit]
+            songs = m.Song.objects.select_related(depth=1).filter(title__search = searchterm)[:result_limit]
+            artists = m.Artist.objects.filter(handle__search = searchterm)|m.Artist.objects.filter(name__search = searchterm)[:result_limit]
+            groups = m.Group.objects.filter(name__search = searchterm)[:result_limit]
+            compilations = m.Compilation.objects.filter(name__search = searchterm)[:result_limit]
+            labels = m.Label.objects.filter(name__search = searchterm)[:result_limit]
         else:
-            users = User.objects.filter(username__icontains = searchterm)[:result_limit]
-            songs = Song.objects.select_related(depth=1).filter(title__icontains = searchterm)[:result_limit]
-            artists = Artist.objects.filter(handle__icontains = searchterm)|Artist.objects.filter(name__icontains = searchterm)[:result_limit]
-            groups = Group.objects.filter(name__icontains = searchterm)[:result_limit]
-            compilations = Compilation.objects.filter(name__icontains = searchterm)[:result_limit]
-            labels = Label.objects.filter(name__icontains = searchterm)[:result_limit]
+            users = m.User.objects.filter(username__icontains = searchterm)[:result_limit]
+            songs = m.Song.objects.select_related(depth=1).filter(title__icontains = searchterm)[:result_limit]
+            artists = m.Artist.objects.filter(handle__icontains = searchterm)|m.Artist.objects.filter(name__icontains = searchterm)[:result_limit]
+            groups = m.Group.objects.filter(name__icontains = searchterm)[:result_limit]
+            compilations = m.Compilation.objects.filter(name__icontains = searchterm)[:result_limit]
+            labels = m.Label.objects.filter(name__icontains = searchterm)[:result_limit]
 
 
         return j2shim.r2r('webview/search.html', \
@@ -412,36 +461,81 @@ def show_approvals(request):
     Shows the most recently approved songs in it's own window
     """
     result_limit = getattr(settings, 'UPLOADED_SONG_COUNT', 150)
-    songs = SongApprovals.objects.order_by('-id')[:result_limit]
+    songs = m.SongApprovals.objects.order_by('-id')[:result_limit]
 
     return j2shim.r2r('webview/recent_approvals.html', { 'songs': songs , 'settings' : settings }, request=request)
 
 class ListArtists(ListByLetter):
     template = "artist_list.html"
-    model = Artist
+    model = m.Artist
 
 class ListGroups(ListByLetter):
     template = "group_list.html"
-    model = Group
+    model = m.Group
 
 class ListLabels(ListByLetter):
     template = "label_list.html"
-    model = Label
+    model = m.Label
 
 class ListComilations(ListByLetter):
     template = "compilation_list.html"
-    model = Compilation
+    model = m.Compilation
 
 class ListSongs(ListByLetter):
     template = "song_list.html"
-    model = Song
+    model = m.Song
 
 class ListScreenshots(ListByLetter):
     template = "screenshot_list.html"
-    model = Screenshot
+    model = m.Screenshot
 
     def get_objects(self):
         return self.model.objects.filter(status="A")
+
+class ThemeClass(WebView):
+    def initialize(self):
+        themeid = self.kwargs['theme_id']
+        self.context['theme'] = self.theme = get_object_or_404(m.Theme, id=themeid)
+
+class ThemeInfo(ThemeClass):
+    template = "theme_details.html"
+
+class ThemeEdit(ThemeClass):
+    template = "theme_edit.html"
+    forms = [(f.ThemeForm, "form")]
+    login_required = True
+
+    def form_form_init(self):
+        return {'instance': self.theme}
+
+    def POST(self):
+        if self.forms_valid and self.request.user == self.theme.creator:
+            self.context['form'].save()
+            self.redirect(self.context['theme'])
+
+class ThemeAddImage(ThemeClass):
+    def GET(self):
+        if self.request.user == self.theme.creator:
+            return create_screenshot(self.request, self.theme)
+        self.redirect("/")
+
+class ThemeList(WebView):
+    template = "themes_list.html"
+
+    def get_objects(self):
+        return m.Theme.objects.filter(active=True)
+
+    def POST(self):
+        id = int(self.request.POST.get("theme_id"))
+        theme = m.Theme.objects.get(id=id)
+        if self.request.user.is_authenticated():
+            p = self.request.user.get_profile()
+            p.theme = theme
+            p.save()
+        self.redirect("dv-themelist")
+
+    def set_context(self):
+        return {"themes": self.get_objects() }
 
 @login_required
 def log_out(request):
@@ -482,42 +576,49 @@ def view_compilation(request, comp_id):
     Try to view a compilation entry.
     """
     permission = request.user.has_perm("webview.make_session")
-    comp = get_object_or_404(Compilation, id=comp_id) # Find it, or return a 404 error
+    comp = get_object_or_404(m.Compilation, id=comp_id) # Find it, or return a 404 error
 
     if permission:
-        sessionform = CreateSessionForm()
+        sessionform = f.CreateSessionForm()
     else:
         sessionform = False
     if request.method == "POST" and permission:
-        sessionform = CreateSessionForm(request.POST)
+        sessionform = f.CreateSessionForm(request.POST)
         if sessionform.is_valid():
             desc = sessionform.cleaned_data['description']
             playtime = sessionform.cleaned_data['time']
             for song in comp.get_songs():
-                Queue.objects.create(song=song, played=False, playtime=playtime, requested_by = request.user, description = desc)
+                m.Queue.objects.create(song=song, played=False, playtime=playtime, requested_by = request.user, description = desc)
             common.get_queue(True)
             return redirect("dv-queue")
     return j2shim.r2r('webview/compilation.html',
         { 'comp' : comp, 'user' : request.user , 'sessionform': sessionform},
         request=request)
 
-@login_required
-def add_favorite(request, id): # XXX Fix to POST
-    """
-    Add a song to the user's favorite. Takes one argument, song id.
-    """
-    user = request.user
-    song = get_object_or_404(Song, id=id)
-    Q = Favorite.objects.filter(user = user, song = song)
-    if not Q: # Does the user already have this as favorite?
-        f = Favorite(user=user, song=song)
-        f.save()
-    #return HttpResponseRedirect(reverse('dv-favorites'))
-    refer = 'HTTP_REFERER' in request.META and request.META['HTTP_REFERER'] or False
-    return HttpResponseRedirect(refer or reverse("dv-favorites"))
+class OnelinerHistorySearch(WebView):
+    template = "oneliner_search.html"
+    forms = [(f.OnelinerHistory, "form")]
+    results = []
+    staff_required = True
+
+    def POST(self):
+        if self.forms_valid:
+            r = m.Oneliner.objects.all()
+            data = self.context["form"].cleaned_data
+            user = data["username"]
+            if user:
+                user = m.User.objects.get(username=user)
+                r = r.filter(user=user)
+            start = data["start"]
+            num = data["results"]
+            self.results = r[start:num+start]
+
+    def set_context(self):
+        return {"results": self.results}
 
 def oneliner(request):
-    oneliner = Oneliner.objects.select_related(depth=1).order_by('-id')[:20]
+    oneliner = m.Oneliner.objects.select_related(depth=1).order_by('-id')[:20]
+    
     return j2shim.r2r('webview/oneliner.html', {'oneliner' : oneliner}, \
         request=request)
 
@@ -541,10 +642,10 @@ def list_favorites(request):
     Display a user's favorites.
     """
     user = request.user
-    songs = Favorite.objects.filter(user=user)
+    songs = m.Favorite.objects.filter(user=user)
 
     try:
-        user_profile = Userprofile.objects.get(user = user)
+        user_profile = m.Userprofile.objects.get(user = user)
         use_pages = user_profile.paginate_favorites
     except:
         # In the event it bails, revert to pages hehe
@@ -561,23 +662,57 @@ def list_favorites(request):
           {'songs': songlist.object_list, 'page' : page, 'page_range' : paginator.page_range}, \
           request=request)
 
-    # Attempt to list all faves at once!
     return j2shim.r2r('webview/favorites.html', { 'songs': songs }, request=request)
 
-@login_required
-def del_favorite(request, id): # XXX Fix to POST
-    """
-    Removes a favorite from the user's list.
-    """
-    S = Song.objects.get(id=id)
-    Q = Favorite.objects.filter(user = request.user, song = S)
-    if Q:
-        Q[0].delete()
-    try:
-        refer = request.META['HTTP_REFERER']
-        return HttpResponseRedirect(refer)
-    except:
-        return HttpResponseRedirect(reverse('dv-favorites'))
+class QueueSong(AjaxifyView):
+    redirect_to = "dv-queue"
+
+    def handle_form(self, form):
+        self.r = common.queue_song(self.song, self.request.user)
+
+    def make_ajax_return(self):
+        if self.r:
+            return HttpResponse("""<span style="display:none">l</span>
+                <img class="song_tail" src="%slock.png" title="Locked" alt="Locked"/>""" %
+                settings.MEDIA_URL)
+        return HttpResponse("")
+
+class ChangeFavorite(AjaxifyView):
+    redirect_to = "dv-favorites"
+
+    def handle_form(self, form):
+        P = form.get
+
+        if P("change") == "remove":
+            Q = m.Favorite.objects.filter(user = self.request.user, song = self.song)
+            for x in Q:
+                x.delete() # For running Favorite.delete() logic
+            m.send_notification("Song removed from your favorites", self.request.user)
+        if P("change") == "add":
+            try:
+                m.Favorite.objects.create(user = self.request.user, song = self.song)
+                m.send_notification("Song added to your favorites", self.request.user)
+            except:
+                pass
+
+    def make_ajax_return(self):
+        s = "{{ display.favorite(song, user) }}"
+        c = {'song': self.song, 'user': self.request.user}
+        return HttpResponse(j2shim.render_string(s, c))
+
+class VoteSong(AjaxifyView):
+    redirect_to = "dv-root"
+
+    @common.atomic("vote")
+    def handle_form(self, form):
+        self.int_vote = int(form.get("vote", form.get("ajaxvote")))
+        if self.int_vote <= 5 and self.int_vote > 0:
+            self.song.set_vote(self.int_vote, self.request.user)
+
+    def make_ajax_return(self):
+        s = "{{ display.song_vote(song, value) }}"
+        c = {'song': self.song, 'value': self.int_vote}
+        return HttpResponse(j2shim.render_string(s, c))
 
 class LinkCheck(object):
     def __init__(self, linktype, object = None, status = 0, user = None, add=False):
@@ -595,11 +730,11 @@ class LinkCheck(object):
         if not o or not generic:
             return None
         bla = ContentType.objects.get_for_model(o)
-        r = GenericLink.objects.filter(content_type__pk=bla.id, object_id=o.id, link=generic)
+        r = m.GenericLink.objects.filter(content_type__pk=bla.id, object_id=o.id, link=generic)
         return r and r[0] or None
 
     def get_list(self):
-        self.linklist = GenericBaseLink.objects.filter(linktype = self.type)
+        self.linklist = m.GenericBaseLink.objects.filter(linktype = self.type)
         r = []
         for x in self.linklist:
             val = self.get_link_for(self.object, x)
@@ -658,7 +793,7 @@ class LinkCheck(object):
                         r.value = val
                         r.save()
                     else:
-                        GenericLink.objects.create(
+                        m.GenericLink.objects.create(
                             content_object=obj,
                             value=val,
                             link=l,
@@ -676,25 +811,25 @@ def new_songinfo_list(request):
     alink = request.GET.get("alink", False)
     status = request.GET.get("status", False)
     if alink and status.isdigit():
-        link = get_object_or_404(GenericLink, id=alink)
+        link = get_object_or_404(m.GenericLink, id=alink)
         link.status = int(status)
         link.content_object.save()
         link.save()
-    nusonginfo = SongMetaData.objects.filter(checked=False).order_by('added') # Oldest info events will be shown first
-    nulinkinfo = GenericLink.objects.filter(status=1)
+    nusonginfo = m.SongMetaData.objects.filter(checked=False).order_by('added') # Oldest info events will be shown first
+    nulinkinfo = m.GenericLink.objects.filter(status=1)
     c = {'metainfo': nusonginfo, 'linkinfo': nulinkinfo}
     return j2shim.r2r("webview/list_newsonginfo.html", c, request)
 
 @permission_required('webview.change_songmetadata')
 def list_songinfo_for_song(request, song_id):
-    song = get_object_or_404(Song, id=song_id)
-    metalist = SongMetaData.objects.filter(song=song)
+    song = get_object_or_404(m.Song, id=song_id)
+    metalist = m.SongMetaData.objects.filter(song=song)
     c = {'metalist':metalist, 'song': song}
     return j2shim.r2r("webview/list_songinfo.html", c, request)
 
 @login_required
 def add_songlinks(request, song_id):
-    song = get_object_or_404(Song, id=song_id)
+    song = get_object_or_404(m.Song, id=song_id)
     links = LinkCheck("S", status=1, user = request.user, add = True)
     if request.method == "POST":
         if links.is_valid(request.POST):
@@ -706,7 +841,7 @@ def add_songlinks(request, song_id):
 
 @permission_required('webview.change_songmetadata')
 def view_songinfo(request, songinfo_id):
-    meta = get_object_or_404(SongMetaData, id=songinfo_id)
+    meta = get_object_or_404(m.SongMetaData, id=songinfo_id)
     if request.method == "POST":
         if request.POST.has_key("activate") and request.POST["activate"]:
             if not meta.checked:
@@ -733,16 +868,16 @@ def view_songinfo(request, songinfo_id):
 #Not done
 class editSonginfo(SongView):
     template = "edit_songinfo.html"
-    forms = [EditSongMetadataForm, "form"]
+    forms = [f.EditSongMetadataForm, "form"]
     login_required = True
 
     def form_form_init(self):
         if self.method == "POST":
-            m = SongMetaData(song=self.song, user=request.user)
+            meta = m.SongMetaData(song=self.song, user=self.request.user)
         else:
-            m = self.song.get_metadata()
-            m.comment = ""
-        return {'instance': m}
+            meta = self.song.get_metadata()
+            meta.comment = ""
+        return {'instance': meta}
 
     def POST(self):
         if self.forms_valid:
@@ -751,36 +886,36 @@ class editSonginfo(SongView):
 
 @login_required
 def edit_songinfo(request, song_id):
-    song = get_object_or_404(Song, id=song_id)
+    song = get_object_or_404(m.Song, id=song_id)
     meta = song.get_metadata()
     meta.comment = ""
 
     form2 = False
     if (request.user.get_profile().have_artist() and request.user.artist in meta.artists.all()) or (request.user.is_staff):
-        form2 = SongLicenseForm(instance=song)
+        form2 = f.SongLicenseForm(instance=song)
 
     if request.method == "POST":
-        m = SongMetaData(song=song, user=request.user)
+        meta = m.SongMetaData(song=song, user=request.user)
         if form2 and request.POST.get("special") == "licchange":
-            form2 = SongLicenseForm(request.POST, instance=song)
+            form2 = f.SongLicenseForm(request.POST, instance=song)
             if form2.is_valid():
                 s = form2.save()
                 song.log(request.user, "Changed song license to %s" % s.license)
                 return redirect(song)
         else:
-            form = EditSongMetadataForm(request.POST, instance=m)
+            form = f.EditSongMetadataForm(request.POST, instance=meta)
             if form.is_valid():
-                d=form.save()
+                form.save()
                 return redirect(song)
     else:
-        form = EditSongMetadataForm(instance=meta)
+        form = f.EditSongMetadataForm(instance=meta)
 
     c = {'form': form, 'song': song, 'form2': form2}
     return j2shim.r2r("webview/edit_songinfo.html", c, request)
 
 @login_required
 def upload_song(request, artist_id):
-    artist = get_object_or_404(Artist, id=artist_id)
+    artist = get_object_or_404(m.Artist, id=artist_id)
     auto_approve = getattr(settings, 'ADMIN_AUTO_APPROVE_UPLOADS', 0)
     artist_auto_approve = getattr(settings, 'ARTIST_AUTO_APPROVE_UPLOADS', 1)
 
@@ -803,10 +938,10 @@ def upload_song(request, artist_id):
             # Automatically approved due to Moderator status
             status = 'A'
 
-        a = Song(uploader = request.user, status = status)
+        a = m.Song(uploader = request.user, status = status)
 
-        form = UploadForm(request.POST, request.FILES, instance = a)
-        infoform = SongMetadataForm(request.POST)
+        form = f.UploadForm(request.POST, request.FILES, instance = a)
+        infoform = f.SongMetadataForm(request.POST)
 
         if links.is_valid(request.POST) and form.is_valid() and infoform.is_valid():
             new_song = form.save(commit=False)
@@ -831,17 +966,17 @@ def upload_song(request, artist_id):
                 # Auto Approved!
                 try:
                     # If the song entry exists, we shouldn't care
-                    exist = SongApprovals.objects.get(song = new_song)
+                    exist = m.SongApprovals.objects.get(song = new_song)
 
                 except:
                     # Should throw when the song isn't found in the DB
-                    Q = SongApprovals(song = new_song, approved_by=request.user, uploaded_by=request.user)
+                    Q = m.SongApprovals(song = new_song, approved_by=request.user, uploaded_by=request.user)
                     Q.save()
 
             return HttpResponseRedirect(new_song.get_absolute_url())
     else:
-        form = UploadForm()
-        infoform = SongMetadataForm()
+        form = f.UploadForm()
+        infoform = f.SongMetadataForm()
     return j2shim.r2r('webview/upload.html', \
         {'form' : form, 'infoform': infoform, 'artist' : artist, 'links': links }, \
         request=request)
@@ -851,8 +986,8 @@ def activate_upload(request):
     if "song" in request.GET and "status" in request.GET:
         songid = int(request.GET['song'])
         status = request.GET['status']
-        song = Song.objects.get(id=songid)
-        url = Site.objects.get_current()
+        song = m.Song.objects.get(id=songid)
+        url = m.Site.objects.get_current()
 
         if status == 'A':
             stat = "Accepted"
@@ -868,7 +1003,7 @@ def activate_upload(request):
         c = Context({
                 'songid' : songid,
                 'song' : song,
-                'site' : Site.objects.get_current(),
+                'site' : m.Site.objects.get_current(),
                 'stat' : stat,
                 'url' : url,
         })
@@ -879,20 +1014,24 @@ def activate_upload(request):
         if(status == 'A'):
             try:
                 # If the song entry exists, we shouldn't care
-                exist = SongApprovals.objects.get(song = song)
+                exist = m.SongApprovals.objects.get(song = song)
 
             except:
                 # Should throw when the song isn't found in the DB
-                Q = SongApprovals(song=song, approved_by=request.user, uploaded_by=song.uploader)
+                Q = m.SongApprovals(song=song, approved_by=request.user, uploaded_by=song.uploader)
                 Q.save()
-
+            if getattr(settings, "NOTIFY_NEW_SONG_APPROVED", False):
+                m.send_notification("Song <a href='%s'>%s</a> was accepted and is now avaliable for queuing!" % (
+                    song.get_absolute_url(),
+                    escape(song.title),
+                ), None, 2)
         if song.uploader.get_profile().pm_accepted_upload and status == 'A' or status == 'R':
             song.uploader.get_profile().send_message(
                 sender = request.user,
                 message = mail_tpl.render(c),
                 subject = "Song Upload Status Changed To: %s" % stat
             )
-    songs = Song.objects.filter(status = "U").order_by('added')
+    songs = m.Song.objects.filter(status = "U").order_by('added')
     return j2shim.r2r('webview/uploaded_songs.html', {'songs' : songs}, request=request)
 
 
@@ -905,11 +1044,11 @@ def showRecentChanges(request):
     comp_limit = getattr(settings, 'RECENT_COMP_VIEW_LIMIT', 20)
 
     # Make a list of stuff needed for the stats page
-    songlist = Song.objects.order_by('-songmetadata__added')[:song_limit]
-    artistlist = Artist.objects.order_by('-last_updated')[:artist_limit]
-    labellist = Label.objects.order_by('-last_updated')[:label_limit]
-    grouplist = Group.objects.order_by('-last_updated')[:group_limit]
-    complist = Compilation.objects.order_by('-last_updated')[:comp_limit]
+    songlist = m.Song.objects.order_by('-songmetadata__added')[:song_limit]
+    artistlist = m.Artist.objects.order_by('-last_updated')[:artist_limit]
+    labellist = m.Label.objects.order_by('-last_updated')[:label_limit]
+    grouplist = m.Group.objects.order_by('-last_updated')[:group_limit]
+    complist = m.Compilation.objects.order_by('-last_updated')[:comp_limit]
 
     # And now return this as a template. default page cache is 5 minutes, which is ample enough
     # To show real changes, without stressing out the SQL loads
@@ -921,17 +1060,17 @@ class songStatistics(WebView):
     template = "stat_songs.html"
 
     def list_favorites(self):
-        return Song.objects.order_by('-num_favorited')
+        return m.Song.objects.order_by('-num_favorited')
 
     def list_voted(self):
-        return Song.objects.filter(rating_votes__gt = 9).order_by('-rating')
+        return m.Song.objects.filter(rating_votes__gt = 9).order_by('-rating')
 
     def list_leastvotes(self):
-        return Song.objects.filter(status="A").exclude(locked_until__gte=datetime.datetime.now()).order_by('rating_votes', '?')[:100]
+        return m.Song.objects.filter(status="A").exclude(locked_until__gte=datetime.datetime.now()).order_by('rating_votes', '?')[:100]
 
     def list_random(self):
-        max_id = Song.objects.order_by('-id')[0].id
-        max_songs = Song.objects.filter(status="A").count()
+        max_id = m.Song.objects.order_by('-id')[0].id
+        max_songs = m.Song.objects.filter(status="A").count()
         num_songs = 100
         num_songs = num_songs < max_songs and num_songs or max_songs
         songlist = []
@@ -945,17 +1084,17 @@ class songStatistics(WebView):
               r = random.randint(0, max_id+1)
             r_list.append(r)
           r_done.extend(r_list)
-          songlist.extend([s for s in Song.objects.filter(id__in=r_list, status="A")])
+          songlist.extend([s for s in m.Song.objects.filter(id__in=r_list, status="A")])
         return songlist
 
     def list_mostvotes(self):
-        return Song.objects.order_by('-rating_votes')
+        return m.Song.objects.order_by('-rating_votes')
 
     def list_queued2(self):
-        return Song.objects.filter(status="A").exclude(locked_until__gte=datetime.datetime.now()).order_by('times_played', 'locked_until')
+        return m.Song.objects.filter(status="A").exclude(locked_until__gte=datetime.datetime.now()).order_by('times_played', 'locked_until')
 
     def list_queued(self):
-        return Song.objects.filter(status="A").order_by('-times_played')
+        return m.Song.objects.filter(status="A").order_by('-times_played')
 
     def initialize(self):
         self.stats = {
@@ -988,8 +1127,44 @@ class tagCloud(WebView):
 
     def set_cached_context(self):
         min_count = getattr(settings, 'TAG_CLOUD_MIN_COUNT', 1)
-        tags = Song.tags.cloud(min_count=min_count)
+        tags = m.Song.tags.cloud(min_count=min_count)
         return {'tags': tags}
+
+class MuteOneliner(WebView):
+    template = "oneliner_mute.html"
+    forms = [
+        (f.MuteOnelinerForm, "banform"),
+    ]
+
+    def check_permissions(self):
+        return self.request.user.has_perm("webview.add_mute_oneliner")
+
+    def POST(self):
+        if self.forms_valid:
+            data = self.context["banform"].cleaned_data
+            user = data["username"]
+            endtime = datetime.datetime.now() + datetime.timedelta(minutes=data["mute_minutes"])
+            entry = m.OnelinerMuted(
+                user=user,
+                muted_to=endtime,
+                reason=data["reason"],
+                added_by=self.request.user,
+                details=data["details"],
+            )
+            if data["ban_ip"]:
+                profile = user.get_profile()
+                if profile.last_ip:
+                    entry.ip_ban = profile.last_ip
+            entry.save()
+            if getattr(m.settings, "BAN_ANNOUNCE", False):
+                m.send_notification("User '%s' have been silenced for %s minutes. Reason: %s" % (user.username,data["mute_minutes"], data["reason"]), None)
+            user.get_profile().log(self.request.user, "Silenced for %s minutes. Reason: %s" % (data["mute_minutes"], data["reason"]))
+            self.redirect("dv-muteoneliner")
+
+    def set_context(self):
+        active = m.OnelinerMuted.objects.filter(muted_to__gt=datetime.datetime.now())
+        history = m.OnelinerMuted.objects.filter(muted_to__lt=datetime.datetime.now())[:10]
+        return {"active": active, "history": history}
 
 class tagDetail(WebView):
     template = "tag_detail.html"
@@ -1002,9 +1177,12 @@ class tagDetail(WebView):
 
     def set_cached_context(self):
         tag = self.kwargs.get("tag", "")
-        songs = TaggedItem.objects.get_by_model(Song, tag)
-        related = Song.tags.related(tag, counts=True)
-        related = tagging.utils.calculate_cloud(related)
+        songs = TaggedItem.objects.get_by_model(m.Song, tag)
+        try:
+            related = m.Song.tags.related(tag, counts=True)
+            related = tagging.utils.calculate_cloud(related)
+        except DatabaseError:
+            related = []
         c = {'songs': songs, 'related': related, 'tag':tag}
         return c
 
@@ -1017,7 +1195,7 @@ class tagEdit(SongView):
         self.song.tags = re.sub(r'[^a-zA-Z0-9!_\-?& ]+', '', t)
         self.song.log(self.request.user, "Edited tags")
         self.song.save() # For updating the "last changed" value
-        TagHistory.objects.create(user=self.request.user, song=self.song, tags = self.request.POST['tags'])
+        m.TagHistory.objects.create(user=self.request.user, song=self.song, tags = self.request.POST['tags'])
         try:
             cache.incr("tagver")
         except:
@@ -1026,7 +1204,7 @@ class tagEdit(SongView):
 
     def set_context(self):
         tags = tagging.utils.edit_string_for_tags(self.song.tags)
-        changes = TagHistory.objects.filter(song=self.song).order_by('-id')[:5]
+        changes = m.TagHistory.objects.filter(song=self.song).order_by('-id')[:5]
         return {'tags': tags, 'changes': changes}
 
 @login_required
@@ -1046,8 +1224,8 @@ def create_artist(request):
         else:
             status = 'U'
 
-        a = Artist(created_by = request.user, status = status)
-        form = CreateArtistForm(request.POST, request.FILES, instance = a)
+        a = m.Artist(created_by = request.user, status = status)
+        form = f.CreateArtistForm(request.POST, request.FILES, instance = a)
         if form.is_valid() and links.is_valid(request.POST):
             new_artist = form.save(commit=False)
             new_artist.save()
@@ -1057,7 +1235,7 @@ def create_artist(request):
 
             return HttpResponseRedirect(new_artist.get_absolute_url())
     else:
-        form = CreateArtistForm()
+        form = f.CreateArtistForm()
     return j2shim.r2r('webview/create_artist.html', \
         {'form' : form, 'links': links }, \
         request=request)
@@ -1070,8 +1248,8 @@ def activate_artists(request):
     if "artist" in request.GET and "status" in request.GET:
         artistid = int(request.GET['artist'])
         status = request.GET['status']
-        artist = Artist.objects.get(id=artistid)
-        url = Site.objects.get_current()  # Pull this into a variable
+        artist = m.Artist.objects.get(id=artistid)
+        url = m.Site.objects.get_current()  # Pull this into a variable
 
         if status == 'A':
             stat = "Accepted"
@@ -1086,7 +1264,7 @@ def activate_artists(request):
         mail_tpl = loader.get_template('webview/email/artist_approval.txt')
         c = Context({
                 'artist' : artist,
-                'site' : Site.objects.get_current(),
+                'site' : m.Site.objects.get_current(),
                 'stat' : stat,
                 'url' : url,
         })
@@ -1100,7 +1278,7 @@ def activate_artists(request):
                 subject = u"Artist %s : %s" % (artist.handle, stat)
             )
 
-    artists = Artist.objects.filter(status = "U").order_by('last_updated')
+    artists = m.Artist.objects.filter(status = "U").order_by('last_updated')
     return j2shim.r2r('webview/pending_artists.html', { 'artists': artists }, request=request)
 
 @login_required
@@ -1121,8 +1299,8 @@ def create_group(request):
             status = 'U'
 
     if request.method == 'POST':
-        g = Group(created_by = request.user, status = status)
-        form = CreateGroupForm(request.POST, request.FILES, instance = g)
+        g = m.Group(created_by = request.user, status = status)
+        form = f.CreateGroupForm(request.POST, request.FILES, instance = g)
         if form.is_valid() and links.is_valid(request.POST):
             new_group = form.save(commit=False)
             new_group.save()
@@ -1132,7 +1310,7 @@ def create_group(request):
 
             return HttpResponseRedirect(new_group.get_absolute_url())
     else:
-        form = CreateGroupForm()
+        form = f.CreateGroupForm()
     return j2shim.r2r('webview/create_group.html', \
         {'form' : form, 'links': links }, \
         request=request)
@@ -1145,7 +1323,7 @@ def activate_groups(request):
     if "group" in request.GET and "status" in request.GET:
         groupid = int(request.GET['group'])
         status = request.GET['status']
-        group = Group.objects.get(id=groupid)
+        group = m.Group.objects.get(id=groupid)
 
         if status == 'A':
             stat = "Accepted"
@@ -1158,7 +1336,7 @@ def activate_groups(request):
         mail_tpl = loader.get_template('webview/email/group_approval.txt')
         c = Context({
                 'group' : group,
-                'site' : Site.objects.get_current(),
+                'site' : m.Site.objects.get_current(),
                 'stat' : stat,
         })
         group.save()
@@ -1171,7 +1349,7 @@ def activate_groups(request):
                 subject = "Group Request Status Changed To: %s" % stat
             )
 
-    groups =Group.objects.filter(status = "U").order_by('last_updated')
+    groups = m.Group.objects.filter(status = "U").order_by('last_updated')
     return j2shim.r2r('webview/pending_groups.html', { 'groups': groups }, request=request)
 
 @permission_required('webview.change_compilation')
@@ -1182,7 +1360,7 @@ def activate_compilations(request):
     if "compilation" in request.GET and "status" in request.GET:
         compilationid = int(request.GET['compilation'])
         status = request.GET['status']
-        compilation = Compilation.objects.get(id=compilationid)
+        compilation = m.Compilation.objects.get(id=compilationid)
 
         if status == 'A':
             stat = "Accepted"
@@ -1195,7 +1373,7 @@ def activate_compilations(request):
         mail_tpl = loader.get_template('webview/email/compilation_approval.txt')
         c = Context({
                 'compilation' : compilation,
-                'site' : Site.objects.get_current(),
+                'site' : m.Site.objects.get_current(),
                 'stat' : stat,
         })
         compilation.save()
@@ -1208,7 +1386,7 @@ def activate_compilations(request):
                 subject = "Compilation Request Status Changed To: %s" % stat
             )
 
-    compilations = Compilation.objects.filter(status = "U").order_by('last_updated')
+    compilations = m.Compilation.objects.filter(status = "U").order_by('last_updated')
     return j2shim.r2r('webview/pending_compilations.html', { 'compilations': compilations }, request=request)
 
 @login_required
@@ -1229,8 +1407,8 @@ def create_label(request):
             status = 'U'
 
     if request.method == 'POST':
-        l = Label(created_by = request.user, status = status)
-        form = CreateLabelForm(request.POST, request.FILES, instance = l)
+        l = m.Label(created_by = request.user, status = status)
+        form = f.CreateLabelForm(request.POST, request.FILES, instance = l)
         if form.is_valid() and links.is_valid(request.POST):
             new_label = form.save(commit=False)
             new_label.save()
@@ -1240,7 +1418,7 @@ def create_label(request):
 
             return HttpResponseRedirect(new_label.get_absolute_url())
     else:
-        form = CreateLabelForm()
+        form = f.CreateLabelForm()
     return j2shim.r2r('webview/create_label.html', \
         {'form' : form, 'links': links }, \
         request=request)
@@ -1253,7 +1431,7 @@ def activate_labels(request):
     if "label" in request.GET and "status" in request.GET:
         labelid = int(request.GET['label'])
         status = request.GET['status']
-        this_label = Label.objects.get(id=labelid)
+        this_label = m.Label.objects.get(id=labelid)
 
         if status == 'A':
             stat = "Accepted"
@@ -1266,7 +1444,7 @@ def activate_labels(request):
         mail_tpl = loader.get_template('webview/email/label_approval.txt')
         c = Context({
                 'label' : this_label,
-                'site' : Site.objects.get_current(),
+                'site' : m.Site.objects.get_current(),
                 'stat' : stat,
         })
         this_label.save()
@@ -1279,7 +1457,7 @@ def activate_labels(request):
                 subject = "Label Request Status Changed To: %s" % stat
             )
 
-    labels = Label.objects.filter(status = "U").order_by('last_updated')
+    labels = m.Label.objects.filter(status = "U").order_by('last_updated')
     return j2shim.r2r('webview/pending_labels.html', { 'labels': labels }, request=request)
 
 
@@ -1300,12 +1478,12 @@ def create_screenshot(request, obj=None):
             status = 'U'
 
     if request.method == 'POST':
-        l = Screenshot(added_by = request.user, status = status)
+        l = m.Screenshot(added_by = request.user, status = status)
 
         new_screenshot = False
 
-        form = CreateScreenshotForm(request.POST, request.FILES, instance = l)
-        form2 = GenericInfoForm(request.POST)
+        form = f.CreateScreenshotForm(request.POST, request.FILES, instance = l)
+        form2 = f.GenericInfoForm(request.POST)
 
         if form2.is_valid():
             connectval = request.POST.get("connectto")
@@ -1316,11 +1494,11 @@ def create_screenshot(request, obj=None):
             if connectval: #if con
                 try:
                     if connectval.isdigit():
-                        new_screenshot = Screenshot.objects.get(id=connectval)
+                        new_screenshot = m.Screenshot.objects.get(id=connectval)
                     else:
-                        new_screenshot = Screenshot.objects.get(name=connectval)
+                        new_screenshot = m.Screenshot.objects.get(name=connectval)
 
-                    ScreenshotObjectLink.objects.create(content_type=ct, object_id=id, image=new_screenshot)
+                    m.ScreenshotObjectLink.objects.create(content_type=ct, object_id=id, image=new_screenshot)
                     new_screenshot.save()
                 except:
                     error = "Screenshot not found!"
@@ -1330,7 +1508,7 @@ def create_screenshot(request, obj=None):
                 new_screenshot.save()
                 form.save_m2m()
 
-                ScreenshotObjectLink.objects.create(content_type=ct, object_id=id, image=new_screenshot)
+                m.ScreenshotObjectLink.objects.create(content_type=ct, object_id=id, image=new_screenshot)
 
                 # Generate a request for the thumbnail
                 new_screenshot.create_thumbnail()
@@ -1346,8 +1524,8 @@ def create_screenshot(request, obj=None):
             i = {'content_type': ct, 'object_id': obj.id, 'error':error}
         else:
             i = {}
-        form = CreateScreenshotForm()
-        form2 = GenericInfoForm(initial=i)
+        form = f.CreateScreenshotForm()
+        form2 = f.GenericInfoForm(initial=i)
     return j2shim.r2r('webview/create_screenshot.html', \
         {'form' : form, 'form2': form2, "obj":obj }, \
         request=request)
@@ -1360,8 +1538,8 @@ def activate_screenshots(request):
     if "screenshot" in request.GET and "status" in request.GET:
         screenshotid = int(request.GET['screenshot'])
         status = request.GET['status']
-        this_screenshot = Screenshot.objects.get(id=screenshotid)
-        url = Site.objects.get_current()
+        this_screenshot = m.Screenshot.objects.get(id=screenshotid)
+        url = m.Site.objects.get_current()
 
         if status == 'A':
             stat = "Accepted"
@@ -1374,7 +1552,7 @@ def activate_screenshots(request):
         mail_tpl = loader.get_template('webview/email/screenshot_approval.txt')
         c = Context({
                 'screenshot' : this_screenshot,
-                'site' : Site.objects.get_current(),
+                'site' : m.Site.objects.get_current(),
                 'stat' : stat,
                 'url' : url,
         })
@@ -1388,12 +1566,19 @@ def activate_screenshots(request):
                 subject = "Screenshot Request Status Changed To: %s" % stat
             )
 
-    screenshots = Screenshot.objects.filter(status = "U").order_by('last_updated')
+    screenshots = m.Screenshot.objects.filter(status = "U").order_by('last_updated')
     return j2shim.r2r('webview/pending_screenshots.html', { 'screenshots': screenshots }, request=request)
+
+@permission_required('webview.change_screenshot')
+def rebuild_thumb(request, screenshot_id):
+    screenshot = get_object_or_404(m.Screenshot, id=screenshot_id) #m.Screenshot.objects.get(id=screenshot_id)  #get_object_or_404(m.Screenshot, id=screenshot_id)
+    screenshot.create_thumbnail()
+    screenshot.save()
+    return j2shim.r2r('webview/screenshot_detail.html', { 'object' : screenshot }, request)
 
 def users_online(request):
     timefrom = datetime.datetime.now() - datetime.timedelta(minutes=5)
-    userlist = Userprofile.objects.filter(last_activity__gt=timefrom).order_by('user__username')
+    userlist = m.Userprofile.objects.filter(last_activity__gt=timefrom).order_by('user__username')
     return j2shim.r2r('webview/online_users.html', {'userlist' : userlist}, request=request)
 
 @login_required
@@ -1403,7 +1588,7 @@ def set_rating_autovote(request, song_id, user_rating):
     """
     int_vote = int(user_rating)
     if int_vote <= 5 and int_vote > 0:
-        S = Song.objects.get(id = song_id)
+        S = m.Song.objects.get(id = song_id)
         S.set_vote(int_vote, request.user)
         #add_event(event="nowplaying")
 
@@ -1428,7 +1613,7 @@ def set_rating(request, song_id):
         except:
              return HttpResponseRedirect(reverse('dv-song', args=[song_id]))
         if R <= 5 and R >= 1:
-            S = Song.objects.get(id = song_id)
+            S = m.Song.objects.get(id = song_id)
             S.set_vote(R, request.user)
     return HttpResponseRedirect(S.get_absolute_url())
 
@@ -1436,8 +1621,8 @@ def link_category(request, slug):
     """
     View all links associated with a specific link category slug
     """
-    link_cat = get_object_or_404(LinkCategory, id_slug = slug)
-    link_data_txt = Link.objects.filter(status="A").filter(link_type="T").filter(url_cat=link_cat) # See what linkage data we have
+    link_cat = get_object_or_404(m.LinkCategory, id_slug = slug)
+    link_data_txt = m.Link.objects.filter(status="A").filter(link_type="T").filter(url_cat=link_cat) # See what linkage data we have
     return j2shim.r2r('webview/links_category.html', \
             {'links_txt' : link_data_txt, 'cat' : link_cat}, \
             request=request)
@@ -1458,15 +1643,15 @@ def link_create(request):
         else:
             status = 'P'
 
-        l = Link(submitted_by = request.user, status = status)
-        form = CreateLinkForm(request.POST, request.FILES, instance = l)
+        l = m.Link(submitted_by = request.user, status = status)
+        form = f.CreateLinkForm(request.POST, request.FILES, instance = l)
         if form.is_valid():
             new_link = form.save(commit=False)
             new_link.save()
             form.save_m2m()
             return j2shim.r2r('webview/link_added.html', request=request) # Redirect to 'Thanks!' screen!
     else:
-        form = CreateLinkForm()
+        form = f.CreateLinkForm()
     return j2shim.r2r('webview/create_link.html', { 'form' : form }, request=request)
 
 @permission_required('webview.change_link')
@@ -1477,7 +1662,7 @@ def activate_links(request):
     if "link" in request.GET and "status" in request.GET:
         linkid = int(request.GET['link'])
         status = request.GET['status']
-        this_link = Link.objects.get(id=linkid)
+        this_link = m.Link.objects.get(id=linkid)
 
         if status == 'A':
             this_link.status = "A"
@@ -1492,7 +1677,7 @@ def activate_links(request):
         this_link.save()
 
     #links = Link.objects.filter(status = "P")
-    links_txt = Link.objects.filter(status="P").filter(link_type="T")
+    links_txt = m.Link.objects.filter(status="P").filter(link_type="T")
     #links_but = Link.objects.filter(status="P").filter(link_type="U")
     #links_ban = Link.objects.filter(status="P").filter(link_type="B")
     return j2shim.r2r('webview/pending_links.html', { 'text_links' : links_txt }, request=request)
@@ -1501,7 +1686,7 @@ def site_links(request):
     """
     Show all active links for this site
     """
-    link_cats = LinkCategory.objects.all() # All categories in the system
+    link_cats = m.LinkCategory.objects.all() # All categories in the system
     return j2shim.r2r('webview/site-links.html', { 'link_cats' : link_cats }, request=request)
 
 def memcached_status(request):
@@ -1515,13 +1700,13 @@ def memcached_status(request):
         return HttpResponseRedirect("/")
 
     # get first memcached URI
-    m = re.match(
+    match = re.match(
         "memcached://([.\w]+:\d+)", settings.CACHE_BACKEND
     )
-    if not m:
+    if not match:
         return HttpResponseRedirect("/")
 
-    host = memcache._Host(m.group(1))
+    host = memcache._Host(match.group(1))
     host.connect()
     host.send_cmd("stats")
 
@@ -1559,7 +1744,7 @@ class LicenseList(WebView):
     template = "licenselist.html"
 
     def set_context(self):
-        licenses = SongLicense.objects.all()
+        licenses = m.SongLicense.objects.all()
         return {'licenses': licenses}
 
 class License(WebView):
@@ -1567,7 +1752,7 @@ class License(WebView):
 
     def set_context(self):
         id = self.kwargs.get("id")
-        license = SongLicense.objects.get(id=id)
+        license = m.SongLicense.objects.get(id=id)
         return {'license': license}
 
 class Login(MyBaseView):
@@ -1621,6 +1806,35 @@ class Login(MyBaseView):
         else:
             self.add_to_limit((key1, key2))
             self.context['error'] = _(u"I'm sorry, the username or password seem to be wrong.")
+
+@login_required
+def nginx_download_song(request, songid):
+    """
+    Use X-Accel-Redirect function of web server to serve song files.
+    """
+    data = m.DOWNLOAD_LIMITS.get("NGINX")
+    if not data:
+        return HttpResponse("Fatal Error, NGINX data not configured")
+    song = m.Song.objects.get(id=int(songid))
+    url = song.file.url
+    if data.get("REGEX"):
+        url = re.sub(*data.get("REGEX") + (url,))
+    response = HttpResponse()
+    response['X-Accel-Redirect'] = data["URL"] + url
+    return response
+
+def play_stream(request):
+    streamurl = getattr(settings, "FLASH_STREAM_URL", False)
+    if not streamurl:
+        surl = m.RadioStream.objects.filter(streamtype="M").order_by('?')
+        if surl:
+            streamurl = surl[0].url
+        else:
+            streamurl = "No MP3 Streams!"
+    return j2shim.r2r(
+        'webview/radioplay.html', dict(
+            streamurl=streamurl,
+        ), request=request)
 
 def upload_progress(request):
     """

@@ -5,13 +5,15 @@
 {% block main %}
 <h2><img class="icon_header" {% if object.label_icon %}src="{{ object.label_icon.url }}"{% else %}src="{{ STATIC_URL }}transmit_blue.png"{% endif %} alt="" />{{ gettext("Label / Production Information For") }} {{ object.name|e }} {% if user.is_staff %} [<a href="/admin/webview/label/{{ object.id }}/">{{ gettext("Edit Info") }}</a>]{% endif %}</h2>
 
+{{ display.onelinerlink("label", object.id, user) }}
+
 <table>
 <tr>
 <td class="label_summary">
 {% if object.logo %}<img class="label_logo" src="{{ object.logo.url }}" />{% else %}<img class="label_logo" src="{{ STATIC_URL }}no_picture.png" />{% endif %}
 <br /><strong>{{ object.name|e }}</strong><br />
-{% if object.found_date %}({{ gettext("Founded On") }}: {{object.found_date|date("F j, Y") }})<br />{% endif %}
-{% if object.cease_date %}{{ gettext("Shutdown Date") }}: {{ object.cease_date }}<br />{% endif %}
+{% if object.found_date %}({{ gettext("Founded On") }}: {{ display.date(object.found_date) }})<br />{% endif %}
+{% if object.cease_date %}{{ gettext("Shutdown Date") }}: {{ display.date(object.cease_date) }}<br />{% endif %}
 
 {{ gettext("Links") }}:{% if object.webpage %} <a href="{{ object.webpage|e }}" target="_blank">{{ gettext("[Website]") }}</a>{% endif %}
 {% if object.wiki_link %} <a href="{{ object.wiki_link|e }}" target="_blank">[Wiki]</a>{% endif %}
@@ -20,7 +22,7 @@
 <p>{{ display.links(object) }}</p>
 <br />
 
-{% if object.last_updated %}{{ gettext("Last Updated") }}: {{ object.last_updated|date("F j, Y") }}<br />{% endif %}
+{% if object.last_updated %}{{ gettext("Last Updated") }}: {{ display.date(object.last_updated) }}<br />{% endif %}
 {% if object.created_by %}{{ gettext("Added By") }}: {% set U = object.created_by %}{% include "webview/t/user.html" %}<br />{% endif %}
 </td>
 <td class="label_description">
@@ -41,8 +43,7 @@
  {% set objs, paging = dv.paginate(object.get_songs().all()) %}
 
  {% for song in objs %}
-  {{ display.song(song) }} {{ gettext("by") }} {{ display.artists(song) }}
-  <span data-name="a_queue_{{ song.id }}">{% include "webview/t/songlist_span_noauth.html" %}</span><br />
+  {{ display.song(song) }} {{ gettext("by") }} {{ display.artists(song) }} {{ display.queue_song(song, user) }}<br />
  {% endfor %}<br />
 {% endif %}
 </td>

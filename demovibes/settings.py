@@ -24,11 +24,27 @@ TEMPLATE_DEBUG = False
 LOOKUP_COUNTRY = True
 DEFAULT_FLAG = "nectaflag"
 
+## Run custom oneliner filters if user is in specific group
+# Gets the oneliner text. "*" gid applies to all users
+# CUSTOM_ONELINER_FILTERS = [(groupid, function)] 
+
+## List of functions to run when new user is created
+# Gets : data = {"user": user, "groupmodel": UserGroup}
+# NEWUSER_FUNCTIONS = []
+
+# URL to use for Flash streaming.
+#FLASH_STREAM_URL = "http://server:port/stream"
+
 #To make this work you need:
 #  1. uWSGI
 #  2. start the uwsgi_eventhandler module
 #  3. Point /demovibes/ajax/monitor/* urls to it
 #UWSGI_EVENT_SERVER = ("127.0.0.1", 3032)
+
+# To protect private notices from prying eyes, type a random secret here.
+#UWSGI_ID_SECRET = ""
+# Note that the same setting will have to be in local_config.py for
+# uwsgi_eventhandler for it to work.
 #
 #If you have vserver that need a specific url, use this:
 #UWSGI_EVENT_SERVER_HTTP = "http://<hostname>/demovibes/ajax/monitor/new/"
@@ -67,7 +83,7 @@ SEARCH_LIMIT = 40
 # although not all choices may be available on all operating systems.
 # If running in a Windows environment this must be set to the same as your
 # system time zone.
-TIME_ZONE = 'Europe/Oslo'
+TIME_ZONE = 'UTC'
 
 # Language code for this installation. All choices can be found here:
 # http://www.i18nguy.com/unicode/language-identifiers.html
@@ -76,7 +92,28 @@ LANGUAGE_CODE = 'en-us'
 SITE_ID = 1
 
 ACCOUNT_ACTIVATION_DAYS = 7
+## List of domains to not accept email registration from
+#BAD_EMAIL_DOMAINS = []
 
+## NGINX specific settings
+
+NGINX = {
+    # "memcached" : True,
+}
+
+## Ban / Mute settings
+#
+# BAN_ANNOUNCE = True
+# BANTIME_MIN = 5
+# BANTIME_MAX = 60
+# BANTIME_INITIAL = 15
+
+## Notifications
+
+NOTIFY_NEW_FORUM_POST = False
+NOTIFY_NEW_FORUM_THREAD = False
+NOTIFY_NEW_SONG_APPROVED = False
+NOTIFY_NEW_SONG_COMMENT = False
 # There may be a situation where your server doesn't have a built-in SMTP server, and you
 # Wish to use a 3rd party SMTP server. Uncommenting these boxes and setting them accordingly
 # Will allow this to take place. The default SMTP options may not deliver to outside world, in
@@ -98,25 +135,33 @@ ACCOUNT_ACTIVATION_DAYS = 7
 
 # END SMTP Configuration
 
-# Cherokee secure url shared key
-# If empty, disable
-# The secure url root should point to static folder.
-# See http://www.cherokee-project.com/doc/modules_handlers_secdownload.html for more info
-CHEROKEE_SECRET_DOWNLOAD_KEY=""
-CHEROKEE_SECRET_DOWNLOAD_PATH=""
-# IF defined, will alter default file url with re.sub(r1, r2, url)
-#CHEROKEE_SECRET_DOWNLOAD_REGEX=(r'', r'')
-# If defined, will limit number of generated links per user to X links per Y seconds
-#CHEROKEE_SECRET_DOWNLOAD_LIMIT={'number': X, 'seconds': Y}
-# Or, more specified:
-#CHEROKEE_SECRET_DOWNLOAD_LIMIT={
-#    'admin': {'number': 30, 'seconds': 60*60*24},
-#    'Group name': {'number': 15, 'seconds': 60*60*24},
-#    'default': {'number': 0, 'seconds': 60*60*24},
-#    'staff': {'number': 3, 'seconds': 60*60*24},
-#}
-# URL to redirect to if limit is reached
-#CHEROKEE_SECRET_DOWNLOAD_LIMIT_URL="/static/badman.html"
+SONG_DOWNLOAD_LIMIT = {
+    "CHEROKEE": {
+    #    # Cherokee secure url shared key
+    #    # The secure url root should point to static folder.
+    #    # See http://www.cherokee-project.com/doc/modules_handlers_secdownload.html for more info
+    #    "KEY": "",
+    #    "PATH": "",
+    #    # IF defined, will alter default file url with re.sub(r1, r2, url)
+    #    "REGEX": ("", ""),
+    },
+    "NGINX": {
+        ## Use X-Accel option for secure download - base URL to use
+        # "URL" : "",
+        # "RATELIMIT": 2048,
+        # "DOWNLOADWINDOW": 10*60
+        ## IF defined, will alter default file url with re.sub(r1, r2, url)
+        # "REGEX": ("", ""),
+    },
+    "LIMITS": {
+        #'admin': {'number': 30, 'seconds': 60*60*24},
+        #'Group name': {'number': 15, 'seconds': 60*60*24},
+        #'default': {'number': 0, 'seconds': 60*60*24},
+        #'staff': {'number': 3, 'seconds': 60*60*24},
+    },
+    "LIMIT_REACHED_URL": "/static/badman.html",
+    "TYPE": None, #"NGINX",
+}
 
 # maximum time a song will be played in seconds
 # only used when demosauce streamer is used
@@ -125,7 +170,7 @@ CHEROKEE_SECRET_DOWNLOAD_PATH=""
 #MAX_SONG_LENGTH = 480
 
 #location of demosauce scan tool
-DEMOSAUCE_SCAN = '../demosauce/scan'
+DEMOSAUCE_SCAN = pj("demosauce", "scan")
 
 # a value that decides if a module is likely to be loopded. 0.1 seems to be good for starters
 # only required if demosauce scan is used
@@ -224,6 +269,10 @@ SECRET_KEY = 'replaceThis!'
 
 AUTH_PROFILE_MODULE = 'webview.userprofile'
 
+
+# Default flag to show for people having no flag or mistyped flag
+#DEFAULT_FLAG = "nectaflag"
+
 # List of callables that know how to import templates from various sources.
 TEMPLATE_LOADERS = (
     'django.template.loaders.filesystem.load_template_source',
@@ -261,14 +310,29 @@ JINJA2_TEMPLATE_DIRS = (
 
 JINJA2_EXTENSIONS = ["jinja2.ext.i18n"]
 
+# The minimum number of songs in queue before limits are considered
+#MIN_QUEUE_SONGS_LIMIT = 1
+
 # Maximum number of songs a user can have in the queue at the same time.
 SONGS_IN_QUEUE = 5
 
 # Optional filter for how many songs of "lowvote" or lower user can have in queue
 #SONGS_IN_QUEUE_LOWRATING = {'limit': 1, 'lowvote':2}
 
+#QUEUE_TIME_LIMIT = (
+#   { 'days' : 0, 'hours' : 0, 'minutes' : 5 }, # Max combined song time
+#   { 'days' : 0, 'hours' : 0, 'minutes' : 5 }  # Over this period of time
+#)
+
 # Time to lock a song until it can be requested again.
 SONG_LOCK_TIME = { 'days' : 0, 'hours' : 0, 'minutes' : 5 }
+#SONG_LOCK_TIME_VOTE = { 'days' : 0, 'hours' : 0, 'minutes' : 5 }
+#SONG_LOCK_TIME_RANDOM = { 'days' : 0, 'hours' : 0, 'minutes' : 5 }
+
+# Define a function to return extra locktime for vote
+# Song is first and only parameter, a number between 0 and 1 should be
+# retuned from that function
+# SONG_LOCKTIME_FUNCTION = None
 
 # Need to have at least one song marked as jingle for this to work
 # Will play one every 30 minutes or 10 songs, but not more often than every 20 minutes.
@@ -335,6 +399,16 @@ except:
 #OTHER_PER_SMILEY_LIMIT = 0
 #OTHER_TOTAL_SMILEY_LIMIT = None
 
+# List of smileys to be restricted to certain users
+#RESTRICTED_SMILEYS = [("trigger", "smiley image")]
+#
+# List of usernames allowed to use the restricted smileys
+#RESTRICTED_SMILEYS_USERS = ["username"]
+
+# Time to mute new users. To limit oneliner spam accounts
+#
+#import datetime
+#NEW_USER_MUTE_TIME = datetime.timedelta(minutes=5)
 
 # demosauce scan requires this. terra said there were problems...
 # but when I tested it I didn't see any

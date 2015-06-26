@@ -69,6 +69,8 @@ FILTERS = {
     'bbcode': dv_extend.bbcode,
     'dv_urlize': dv_extend.dv_urlize,
     'mksafe': mksafe,
+    'custom_filters': dv_extend.custom_filters,
+    'restricted_smileys': dv_extend.smileys_restricted,
 }
 
 # Dictionary over globally avaliable variables and functions

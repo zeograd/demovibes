@@ -1,97 +1,233 @@
 from webview import models
-from django.conf import settings
+from webview.models import get_now_playing_song
 from django.core.cache import cache
 from django.conf import settings
+from django.http import HttpResponseForbidden
+from functools import wraps
+from django.utils.decorators import available_attrs
+from django.template.loader import render_to_string
+
+from django.core.urlresolvers import reverse
+
+from django.db.models import Sum
+
+from django.utils.html import escape
+
 import logging
 import socket
 import datetime
 import j2shim
+import time
 
+logger = logging.getLogger("dv.webview.common")
+
+try:
+    import memcache
+    # Temp test code FIXME
+    mc = memcache.Client(['127.0.0.1:11211'], debug=0)
+except:
+    logger.debug("Could not load memcache module")
+    memcache = None
+
+MIN_QUEUE_SONGS_LIMIT = getattr(settings, "MIN_QUEUE_SONGS_LIMIT", 0)
+QUEUE_TIME_LIMIT = getattr(settings, "QUEUE_TIME_LIMIT", False)
 SELFQUEUE_DISABLED = getattr(settings, "SONG_SELFQUEUE_DISABLED", False)
+LOWRATE = getattr(settings, 'SONGS_IN_QUEUE_LOWRATING', False)
 
-def play_queued(queue):
-    queue.song.times_played = queue.song.times_played + 1
-    queue.song.save()
-    queue.time_played=datetime.datetime.now()
-    queue.played = True
-    queue.save()
+NGINX_MEMCACHE = memcache and getattr(settings, 'NGINX', {}).get("memcached")
+
+def nginx_memcache_it(key, use_eventkey = True):
+    def func1(func):
+        def func2(*args, **kwargs):
+            r = func(*args, **kwargs)
+            url = reverse(key) + "?"
+            latest_event = get_latest_event()
+
+            logger.debug("NGINX: Latest event is %s", latest_event)
+
+            if use_eventkey:
+                # Clients often connect with older id's, for various reasons
+                # This should make it far more likely that they get current data
+                # and actually hit the cache in the first place
+                for x in range(latest_event - 6, latest_event + 1, 1):
+                    cachekey = url + "event=%s" % x
+                    logger.debug("NGINX: Setting cache for key %s", cachekey)
+                    mc.set(cachekey, r.encode("utf8"), 30)
+            else:
+                logger.debug("NGINX: Setting cache for key %s", url)
+                mc.set(url, r.encode("utf8"), 30)
+            return r
+
+        if not NGINX_MEMCACHE:
+            logger.info("NGINX: Memcache settings not configured")
+            return func
+        return func2
+    return func1
+
+
+def atomic(key, timeout=30, wait=60):
+    """
+    Lock a function so it can not be run in parallell
+
+    Key value identifies function to lock
+    """
+    lockkey = "lock-" + key
+    def func1(func):
+        def func2(*args, **kwargs):
+            c = 0
+            has_lock = cache.add(lockkey, 1, timeout)
+            while not has_lock and c < wait * 10:
+                c = c + 1
+                time.sleep(0.1)
+                has_lock = cache.add(lockkey, 1, timeout)
+            if has_lock:
+                try:
+                    return func(*args, **kwargs)
+                finally:
+                    cache.delete(lockkey)
+        return func2
+    return func1
+
+def ratelimit(limit=10,length=86400):
+    """
+    Limit function to <limit> runs per ip address, over <length> seconds.
+
+    Expects first function parameter to be a request object.
+    """
+    def decorator(func):
+        def inner(request, *args, **kwargs):
+            ip_hash = str(hash(request.META['REMOTE_ADDR']))
+            result = cache.get(ip_hash)
+            if result:
+                result = int(result)
+                if result == limit:
+                    logger.warning("Rate limited : %s", request.META['REMOTE_ADDR'])
+                    return HttpResponseForbidden("Ooops, too many requests!")
+                else:
+                    cache.incr(ip_hash)
+                    return func(request,*args,**kwargs)
+            cache.add(ip_hash,1,length)
+            return func(request, *args, **kwargs)
+        return wraps(func, assigned=available_attrs(func))(inner)
+    return decorator
+
+def play_queued(queue_item):
+    queue_item.song.times_played = queue_item.song.times_played + 1
+    queue_item.song.save()
+    queue_item.time_played=datetime.datetime.now()
+    queue_item.played = True
+    queue_item.save()
     temp = get_now_playing(True)
     temp = get_history(True)
     temp = get_queue(True)
     models.add_event(eventlist=("queue", "history", "nowplaying"))
 
-# This function should both make cake, and eat it
+
+def find_queue_time_limit(user, song):
+    """
+    Return seconds left of limit
+    """
+    next = False
+    if QUEUE_TIME_LIMIT:
+        limit = models.TimeDelta(**QUEUE_TIME_LIMIT[0])
+        duration = models.TimeDelta(**QUEUE_TIME_LIMIT[1])
+        start = datetime.datetime.now() - duration
+
+        #Fetch all queued objects by that user in given time period
+        Q = models.Queue.objects.filter(requested__gt = start, requested_by = user).order_by("id")
+
+        total_seconds = limit.total_seconds() - song.get_songlength()
+
+        if Q.count():
+            queued_seconds = Q.aggregate(Sum("song__song_length"))["song__song_length__sum"] #Length of all songs queued
+            seconds_left = total_seconds - queued_seconds
+            earliest = Q[0].requested
+            next = earliest + duration
+            if seconds_left <= 0:
+                seconds_left = seconds_left + song.get_songlength()
+                return (True, seconds_left, next)
+            return (False, seconds_left, next)
+        return (False, total_seconds, next)
+    return (False, False, next)
+
+@atomic("queue-song")
 def queue_song(song, user, event = True, force = False):
     event_metadata = {'song': song.id, 'user': user.id}
+
     if SELFQUEUE_DISABLED and song.is_connected_to(user):
-        models.add_event(event='eval:alert("You can\'t request your own songs!");', user = user, metadata = event_metadata)
+        models.send_notification("You can't request your own songs!", user)
         return False
 
-    sl = settings.SONG_LOCK_TIME
+    #To update lock time and other stats
+    song = models.Song.objects.get(id=song.id)
+
+    key = "songqueuenum-" + str(user.id)
+
     EVS = []
     Q = False
-    time = datetime.timedelta(hours = sl['hours'], days = sl['days'], minutes = sl['minutes'])
+    time = song.create_lock_time()
     result = True
-    models.Queue.objects.lock(models.Song, models.User, models.AjaxEvent, models.SongVote)
+
+    if models.Queue.objects.filter(played=False).count() < MIN_QUEUE_SONGS_LIMIT and not song.is_locked():
+        force = True
+
+    time_full, time_left, time_next = find_queue_time_limit(user, song)
+    time_left_delta = models.TimeDelta(seconds=time_left)
+
     if not force:
+
+        if time_full:
+            result = False
+            models.send_notification("Song is too long. Remaining timeslot : %s. Next timeslot change: <span class='tzinfo'>%s</span>" %
+                        (time_left_delta.to_string(), time_next.strftime("%H:%M")), user)
+
+        requests = cache.get(key, None)
         Q = models.Queue.objects.filter(played=False, requested_by = user)
-        requests = Q.count()
-        lowrate = getattr(settings, 'SONGS_IN_QUEUE_LOWRATING', False)
-        if lowrate and song.rating and song.rating <= lowrate['lowvote']:
-            try:
-                if Q.filter(song__rating__lte = lowrate['lowvote']).count() >= lowrate['limit']:
-                    lowrate = True
-                else:
-                    lowrate = False
-            except:
-                lowrate = False
+        if requests == None:
+            requests = Q.count()
         else:
-            lowrate = False
+            requests = len(requests)
 
-        if lowrate:
-            models.add_event(event='eval:alert("Anti-Crap: Song Request Denied (Rating Too Low For Current Queue)");', user = user, metadata = event_metadata)
+        if result and requests >= settings.SONGS_IN_QUEUE:
+
+            models.send_notification("You have reached your unplayed queue entry limit! Please wait for your requests to play.", user)
             result = False
 
-        if requests >= settings.SONGS_IN_QUEUE:
-            models.add_event(event='eval:alert("You have reached your queue limit! Please wait for your requests to play.");', user = user, metadata = event_metadata)
-            result = False
         if result and song.is_locked():
             # In a case, this should not append since user (from view) can't reqs song locked
-            models.add_event(event='eval:alert("You can\'t queue a song locked!");', user = user, metadata = event_metadata)
+            models.send_notification("Song is already locked", user)
             result = False
+
+        if result and LOWRATE and song.rating and song.rating <= LOWRATE['lowvote']:
+            if Q.filter(song__rating__lte = LOWRATE['lowvote']).count() >= LOWRATE['limit']:
+                models.send_notification("Anti-Crap: Song Request Denied (Rating Too Low For Current Queue)", user)
+                result = False
+
     if result:
         song.locked_until = datetime.datetime.now() + time
         song.save()
         Q = models.Queue(song=song, requested_by=user, played = False)
-        Q.save()
-    models.Queue.objects.unlock()
-    if result:
         Q.eta = Q.get_eta()
         Q.save()
         EVS.append('a_queue_%i' % song.id)
+
+        #Need to add logic to decrease or delete when song gets played
+        #cache.set(key, requests + 1, 600)
+
         if event:
-            bla = get_queue(True) # generate new queue cached object
+            get_queue(True) # generate new queue cached object
             EVS.append('queue')
-    models.add_event(eventlist=EVS, metadata = event_metadata)
-    return Q
+            msg = "%s has been queued." % escape(song.title)
+            msg += " It is expected to play at <span class='tzinfo'>%s</span>." % Q.eta.strftime("%H:%M")
+            if time_left != False:
+                msg += " Remaining timeslot : %s." % time_left_delta.to_string()
+            models.send_notification(msg, user)
+        models.add_event(eventlist=EVS, metadata = event_metadata)
+        return Q
 
-
-def get_now_playing_song(create_new=False):
-    queueobj = cache.get("nowplaysong")
-    if not queueobj or create_new:
-        try:
-            timelimit = datetime.datetime.now() - datetime.timedelta(hours=6)
-
-            queueobj = models.Queue.objects.select_related(depth=3).filter(played=True).filter(time_played__gt = timelimit).order_by('-time_played')[0]
-            logging.debug("Checking now playing song : Time limit is %s", timelimit)
-        except:
-            logging.info("Could not find now_playing")
-            return False
-        cache.set("nowplaysong", queueobj, 300)
-    return queueobj
-
+#@nginx_memcache_it("dv-ax-nowplaying")
 def get_now_playing(create_new=False):
-    logging.debug("Getting now playing")
+    logger.debug("Getting now playing")
     key = "nnowplaying"
 
     try:
@@ -105,59 +241,62 @@ def get_now_playing(create_new=False):
         comps = models.Compilation.objects.filter(songs__id = song.id)
         R = j2shim.r2s('webview/t/now_playing_song.html', { 'now_playing' : songtype, 'comps' : comps })
         cache.set(key, R, 300)
-        logging.debug("Now playing generated")
+        logger.debug("Now playing generated")
     R = R.replace("((%timeleft%))", str(songtype.timeleft()))
     return R
 
+@nginx_memcache_it("dv-ax-history")
 def get_history(create_new=False):
     key = "nhistory"
-    logging.debug("Getting history cache")
+    logger.debug("Getting history cache")
     R = cache.get(key)
     if not R or create_new:
         nowplaying = get_now_playing_song()
         limit = nowplaying and (nowplaying.id - 50) or 0
-        logging.info("No existing cache for history, making new one")
+        logger.info("No existing cache for history, making new one")
         history = models.Queue.objects.select_related(depth=3).filter(played=True).filter(id__gt=limit).order_by('-time_played')[1:21]
         R = j2shim.r2s('webview/js/history.html', { 'history' : history })
         cache.set(key, R, 300)
-        logging.debug("Cache generated")
+        logger.debug("Cache generated")
     return R
 
+@nginx_memcache_it("dv-ax-oneliner")
 def get_oneliner(create_new=False):
     key = "noneliner"
-    logging.debug("Getting oneliner cache")
+    logger.debug("Getting oneliner cache")
     R = cache.get(key)
     if not R or create_new:
-        logging.info("No existing cache for oneliner, making new one")
+        logger.info("No existing cache for oneliner, making new one")
         lines = getattr(settings, 'ONELINER', 10)
         oneliner = models.Oneliner.objects.select_related(depth=2).order_by('-id')[:lines]
         R = j2shim.r2s('webview/js/oneliner.html', { 'oneliner' : oneliner })
         cache.set(key, R, 600)
-        logging.debug("Cache generated")
+        logger.debug("Cache generated")
     return R
 
 def get_roneliner(create_new=False):
     key = "rnoneliner"
-    logging.debug("Getting reverse oneliner cache")
+    logger.debug("Getting reverse oneliner cache")
     R = cache.get(key)
     if not R or create_new:
-        logging.info("No existing cache for reverse oneliner, making new one")
+        logger.info("No existing cache for reverse oneliner, making new one")
         oneliner = models.Oneliner.objects.select_related(depth=2).order_by('id')[:15]
         R = j2shim.r2s('webview/js/roneliner.html', { 'oneliner' : oneliner })
         cache.set(key, R, 600)
-        logging.debug("Cache generated")
+        logger.debug("Cache generated")
     return R
 
+@nginx_memcache_it("dv-ax-queue")
 def get_queue(create_new=False):
     key = "nqueue"
-    logging.debug("Getting cache for queue")
+    logger.debug("Getting cache for queue")
     R = cache.get(key)
     if not R or create_new:
-        logging.info("No existing cache for queue, making new one")
+        logger.info("No existing cache for queue, making new one")
         queue = models.Queue.objects.select_related(depth=2).filter(played=False).order_by('id')
         R = j2shim.r2s("webview/js/queue.html", { 'queue' : queue })
         cache.set(key, R, 300)
-        logging.debug("Cache generated")
+        logger.debug("Cache generated")
     return R
 
 def get_profile(user):
@@ -174,6 +313,13 @@ def get_profile(user):
     return profile
 
 def get_latest_event():
+    curr = cache.get("curr_event")
+    if not curr:
+        curr = get_latest_event_lookup()
+        cache.set("curr_event", curr, 30)
+    return curr
+
+def get_latest_event_lookup():
     use_eventful = getattr(settings, 'USE_EVENTFUL', False)
     if use_eventful:
         host = getattr(settings, 'EVENTFUL_HOST', "127.0.0.1")
@@ -193,55 +339,30 @@ def get_latest_event():
         except:
             return 0
 
-def log_debug(area, text, level=1):
-    settings_level = getattr(settings, 'DEBUGLEVEL', 0)
-    settings_debug = getattr(settings, 'DEBUG')
-    settings_file = getattr(settings, 'DEBUGFILE', "/tmp/django-error.log")
-    if settings_debug and level <= settings_level:
-        F = open(settings_file, "a")
-        F.write("(%s) <%s:%s> %s\n" % (time.strftime("%d/%b/%Y %H:%M:%S", time.localtime()), area, level, text))
-        F.close()
-
-
 def add_oneliner(user, message):
     message = message.strip()
     can_post = user.is_superuser or not user.has_perm('webview.mute_oneliner')
+
+    r = user.get_profile().is_muted()
+    if can_post and r:
+        can_post = False
+        models.send_notification('You can not post until <span class="tzinfo">%s</span>. Reason: %s' % (r["time"].strftime("%H:%M"), r["reason"]), user)
+
     if message and can_post:
         models.Oneliner.objects.create(user = user, message = message)
-        f = get_oneliner(True)
+        get_oneliner(True)
+        make_oneliner_xml(True)
         models.add_event(event='oneliner')
 
 def get_event_key(key):
     event = get_latest_event()
     return "%sevent%s" % (key, event)
 
-# Not perfect, borks if I add () to decorator (or arguments..)
-# Tried moving logic to call and def a wrapper there, but django somehow didn't like that
-#
-# Code will try to find an "event" value in the GET part of the url. If it can't find it,
-# the current event number is collected from database.
-class cache_output(object):
-
-    def __init__(self, f):
-        self.f = f
-        self.n = f.__name__
-        self.s = 60*5 # default cache time in seconds
-
-    def __call__(self, *args, **kwargs):
-        try:
-            try:
-                path = args[0].path
-            except:
-                path = self.n
-            try:
-                event = args[0].GET['event']
-            except: # no event get string found
-                event = get_latest_event()
-            key = "%s.%s" % (path, event)
-            value = cache.get(key)
-            if not value:
-                value = self.f(*args, **kwargs)
-                cache.set(key, value, self.s)
-        except:
-            value = self.f(*args, **kwargs)
-        return value
+@nginx_memcache_it("xml-oneliner-cache", False)
+def make_oneliner_xml(force=False):
+    data = cache.get("oneliner_xml")
+    if force or data == None:
+        oneliner_data = models.Oneliner.objects.select_related(depth=1).order_by('-id')[:20]
+        data = render_to_string('webview/xml/oneliner.xml', {'oneliner_data' : oneliner_data})
+        cache.set("oneliner_xml", data, 60)
+    return data

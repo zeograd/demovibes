@@ -86,7 +86,86 @@
 	<td>TestMessage103</td>
 	<td></td>
 </tr>
-
+<tr>
+	<td>type</td>
+	<td>id=id_body</td>
+	<td>[song]1[/song]<br />[queue]1[/queue]</td>
+</tr>
+<tr>
+	<td>clickAndWait</td>
+	<td>css=#maincontent &gt; form &gt; input[type=&quot;submit&quot;]</td>
+	<td></td>
+</tr>
+<tr>
+	<td>verifyElementPresent</td>
+	<td>link=Hurr</td>
+	<td></td>
+</tr>
+<tr>
+	<td>verifyElementPresent</td>
+	<td>css=form[name=&quot;queue_song&quot;] &gt; input[name=&quot;img&quot;]</td>
+	<td></td>
+</tr>
+<tr>
+	<td>clickAndWait</td>
+	<td>link=asd</td>
+	<td></td>
+</tr>
+<tr>
+	<td>click</td>
+	<td>id=id_subscribe</td>
+	<td></td>
+</tr>
+<tr>
+	<td>type</td>
+	<td>id=id_title</td>
+	<td>New Thread Test</td>
+</tr>
+<tr>
+	<td>type</td>
+	<td>id=id_body</td>
+	<td>This is a new thread!<br /><br />Test 123</td>
+</tr>
+<tr>
+	<td>clickAndWait</td>
+	<td>css=#postThread &gt; input[type=&quot;submit&quot;]</td>
+	<td></td>
+</tr>
+<tr>
+	<td>verifyTextPresent</td>
+	<td>New Thread Test</td>
+	<td></td>
+</tr>
+<tr>
+	<td>verifyTextPresent</td>
+	<td>This is a new thread! </td>
+	<td></td>
+</tr>
+<tr>
+	<td>clickAndWait</td>
+	<td>link=Manage Your Subscriptions</td>
+	<td></td>
+</tr>
+<tr>
+	<td>verifyElementPresent</td>
+	<td>link=New Thread Test</td>
+	<td></td>
+</tr>
+<tr>
+	<td>click</td>
+	<td>name=5</td>
+	<td></td>
+</tr>
+<tr>
+	<td>clickAndWait</td>
+	<td>name=updatesubs</td>
+	<td></td>
+</tr>
+<tr>
+	<td>verifyTextPresent</td>
+	<td>No subscriptions</td>
+	<td></td>
+</tr>
 </tbody></table>
 </body>
 </html>

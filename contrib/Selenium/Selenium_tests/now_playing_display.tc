@@ -43,15 +43,9 @@
 </tr>
 <tr>
 	<td>assertTextPresent</td>
-	<td>Rating: 5 (1 Votes)</td>
+	<td>Rating: 5.00 (1 Votes)</td>
 	<td></td>
 </tr>
-<tr>
-	<td>assertTextPresent</td>
-	<td>Your Vote: 0</td>
-	<td></td>
-</tr>
-
 </tbody></table>
 </body>
 </html>

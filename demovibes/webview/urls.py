@@ -4,26 +4,11 @@ from django.conf import settings
 from demovibes.webview import views
 import djangojinja2
 
-song_dict = {
-    'queryset': Song.objects.select_related(depth=1).all(),
-    'extra_context': {  'a_test' : "True", 'vote_range': [1, 2, 3, 4, 5]},
-    'template_loader': djangojinja2._jinja_env,
-}
-
-screenshot_dict = {
-    'queryset': Screenshot.objects.filter(status="A"),
-    'template_loader': djangojinja2._jinja_env,
-}
-
 oneliner_dict = {
     'queryset': Oneliner.objects.all(),
     'template_loader': djangojinja2._jinja_env,
 }
 
-artist_dict = {
-    'queryset': Artist.objects.filter(status="A"),
-    'template_loader': djangojinja2._jinja_env,
-}
 
 """
 Access any artist object.
@@ -33,24 +18,11 @@ artist_a_dict = {
     'template_loader': djangojinja2._jinja_env,
 }
 
-group_dict = {
-    'queryset': Group.objects.filter(status="A"),
-    'template_loader': djangojinja2._jinja_env,
-}
-
 """
 Access any group object.
 """
 group_a_dict = {
     'queryset': Group.objects.all(),
-    'template_loader': djangojinja2._jinja_env,
-}
-
-"""
-Shows all active lables in the system
-"""
-labels_all_dict = {
-    'queryset': Label.objects.filter(status="A"),
     'template_loader': djangojinja2._jinja_env,
 }
 
@@ -64,11 +36,6 @@ labels_a_dict = {
 
 news_dict = {
     'queryset': News.objects.all(),
-    'template_loader': djangojinja2._jinja_env,
-}
-
-comp_dict = {
-    'queryset': Compilation.objects.filter(status="A"),
     'template_loader': djangojinja2._jinja_env,
 }
 
@@ -114,19 +81,26 @@ urlpatterns = patterns('',
     url(r'^login/$',                               views.Login(), name = "dv-login"),
     url(r'^licenses/$',                            views.LicenseList(), name = "dv-licenses"),
     url(r'^license/(?P<id>\d+)/$',                 views.License(), name = "dv-license"),
+    url(r'^smileys/$',                              views.ListSmileys(), name = "dv-smileys"),
 
     url(r'^inbox/$',                               'demovibes.webview.views.inbox', name = "dv-inbox"),
     url(r'^inbox/(?P<pm_id>\d+)/$',                'demovibes.webview.views.read_pm', name = "dv-read_pm"),
     url(r'^inbox/send/$',                          'demovibes.webview.views.send_pm', name = "dv-send_pm"),
 
-    url(r'^play/$',                                'django.views.generic.simple.direct_to_template', \
-                { 'template':'webview/radioplay.html'}, name = "dv-play_stream"),
+    url(r'^play/$',                                'demovibes.webview.views.play_stream', name = "dv-play_stream"),
+
+    #url(r'^play/$',                                'django.views.generic.simple.direct_to_template', \
+    #            { 'template':'webview/radioplay.html'}, name = "dv-play_stream"),
     url(r'^$',                                     'django.views.generic.list_detail.object_list',     news_dict, name = "dv-root"),
     url(r'^streams/streams.txt$',                  'django.views.generic.list_detail.object_list',     streams_dict_txt, name = "dv-streams.txt"),
     url(r'^streams/streams.m3u$',                  'django.views.generic.list_detail.object_list',     streams_dict_m3u, name = "dv-streams.m3u"),
     url(r'^streams/$',                             'django.views.generic.list_detail.object_list',     streams_dict, name = "dv-streams"),
     url(r'^oneliner/$',                            'django.views.generic.list_detail.object_list', \
                 dict(oneliner_dict, paginate_by=settings.PAGINATE), name = "dv-oneliner"),
+
+    url(r'^oneliner/mute/$',                       views.MuteOneliner(), name = "dv-muteoneliner"),
+    url(r'^oneliner/lookie/$',                       views.OnelinerHistorySearch(), name = "dv-onelinerhsearch"),
+
     #url(r'^search/$',                              'demovibes.webview.views.search', name = "dv-search"),
     url(r'^recent/$',                              'demovibes.webview.views.show_approvals', name = "dv-recent"),
     url(r'^platform/(?P<object_id>\d+)/$',         'django.views.generic.list_detail.object_detail', platforms, name = "dv-platform"),
@@ -142,6 +116,7 @@ urlpatterns = patterns('',
     url(r'^screenshots/(?P<letter>.)/$',         views.ListScreenshots(), name = "dv-screenshots_letter"),
     url(r'^screenshot/(?P<screenshot_id>\d+)/$', 'demovibes.webview.views.list_screenshot',   name = "dv-screenshot"),
     url(r'^screenshot/create/$',                    'demovibes.webview.views.create_screenshot', name = "dv-createscreenshot"),
+    url(r'^screenshot/(?P<screenshot_id>\d+)/rethumb/$', 'demovibes.webview.views.rebuild_thumb',   name = "dv-screenshot-rethumb"),
     url(r'^new_screenshots/$',                      'demovibes.webview.views.activate_screenshots', name = "dv-newscreenshots"),
 
     #Song views
@@ -149,6 +124,7 @@ urlpatterns = patterns('',
     url(r'^songs/$',                               views.ListSongs(), name = "dv-songs"),
     url(r'^songs/(?P<letter>.)/$',                 views.ListSongs(), name = "dv-songs_letter"),
     url(r'^song/(?P<song_id>\d+)/$',             'demovibes.webview.views.list_song',   name = "dv-song"),
+    url(r'^song/(?P<song_id>\d+)/download/$',             views.DownloadSong(),   name = "dv-dl-song"),
     url(r'^song/(?P<song_id>\d+)/addlink/$',             'demovibes.webview.views.add_songlinks',   name = "dv-song-addlink"),
     url(r'^song/(?P<song_id>\d+)/edit/$',             'demovibes.webview.views.edit_songinfo',   name = "dv-song-edit"),
     url(r'^song/(?P<song_id>\d+)/infolist/$',             'demovibes.webview.views.list_songinfo_for_song',   name = "dv-song-infolist"),
@@ -173,13 +149,8 @@ urlpatterns = patterns('',
     url(r'^artist/(?P<object_id>\d+)/$',           'django.views.generic.list_detail.object_detail',       artist_a_dict, name = "dv-artist"),
     url(r'^artist/(?P<artist_id>\d+)/upload/$',    'demovibes.webview.views.upload_song', name = "dv-upload"),
 
-    # New voting system, works differently so contains its own views. This is for URL voting. A
-    # Vote can be passed via URL, such as a 3rd party app, in the form of:
-    # http://site/demovibes/song/12/vote/1/
-    url(r'^song/(?P<song_id>\d+)/vote/(?P<user_rating>\d+)/$',          'demovibes.webview.views.set_rating_autovote', name = "dv-vote-autovote"),
 
-    # We also want to keep traditional voting support, for non-playing songs
-    url(r'^song/(?P<song_id>\d+)/vote/$',          'demovibes.webview.views.set_rating', name = "dv-vote"),
+    url(r'^song/vote/$',          views.VoteSong(), name = "dv-formvote"),
 
     # Add support for displaying all compilations
     url(r'^compilations/$',                             views.ListComilations(), name = "dv-compilations"),
@@ -192,16 +163,24 @@ urlpatterns = patterns('',
     url(r'^user/(?P<user>\w+)/$',                  views.ViewProfile(), name = "dv-profile"),
     url(r'^user/(?P<user>\w+)/favorites/$',        views.ViewUserFavs(), name = "dv-user-favs"),
     url(r'^queue/$',                               views.listQueue(), name = "dv-queue"),
-    url(r'^song/(?P<song_id>\d+)/queue/$',         views.AddQueue(), name = "dv-add_queue"),
+    url(r'^song/queue/$',                               views.QueueSong(), name = "dv-queue-song"),
     url(r'^song/(?P<song_id>\d+)/screenshot/$',    views.SongAddScreenshot(), name = "dv-add_screenshot"),
     url(r'^song/(?P<song_id>\d+)/play/$',          views.PlaySong(), name = "dv-play_song"),
     url(r'^comment/add/(?P<song_id>\d+)/$',        views.addComment(), name = "dv-addcomment"),
+
     url(r'^tags/$',                                views.tagCloud(), name = "dv-tagcloud"),
     url(r'^tags/(?P<tag>[^/]+)/$',                 views.tagDetail(), name = "dv-tagdetail"),
     url(r'^song/(?P<song_id>\d+)/tags/$',          views.tagEdit(), name = "dv-songtags"),
-    url(r'^favorites/add/(?P<id>\d+)/$',           'demovibes.webview.views.add_favorite', name = "dv-add_fav"),
+
+    url(r'^themes/$',                                views.ThemeList(), name = "dv-themelist"),
+    url(r'^theme/(?P<theme_id>\d+)/$',               views.ThemeInfo(), name = "dv-themeinfo"),
+    url(r'^theme/(?P<theme_id>\d+)/add_image/$',     views.ThemeAddImage(), name = "dv-themeaddimage"),
+    url(r'^theme/(?P<theme_id>\d+)/edit/$',         views.ThemeEdit(), name = "dv-themeedit"),
+
+    url(r'^favorites/change/$',                     views.ChangeFavorite(), name = "dv-change_fav"),
+    #url(r'^favorites/add/(?P<id>\d+)/$',           'demovibes.webview.views.add_favorite', name = "dv-add_fav"),
     url(r'^favorites/$',                           'demovibes.webview.views.list_favorites', name = "dv-favorites"),
-    url(r'^favorites/del/(?P<id>\d+)/$',           'demovibes.webview.views.del_favorite', name = "dv-del_fav"),
+    #url(r'^favorites/del/(?P<id>\d+)/$',           'demovibes.webview.views.del_favorite', name = "dv-del_fav"),
     url(r'^uploaded_songs/$',                      'demovibes.webview.views.activate_upload', name = "dv-uploads"),
     url(r'^upload_progress/$',                      'demovibes.webview.views.upload_progress', name = "dv-upload-progress"),
     url(r'^oneliner/submit/$',                     'demovibes.webview.views.oneliner_submit', name = "dv-oneliner_submit"),

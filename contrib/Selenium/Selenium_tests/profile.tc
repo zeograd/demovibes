@@ -23,6 +23,11 @@
 </tr>
 <tr>
 	<td>type</td>
+	<td>id=id_fave_id</td>
+	<td>3</td>
+</tr>
+<tr>
+	<td>type</td>
 	<td>id_info</td>
 	<td>IamATestContentFillerTextString</td>
 </tr>
@@ -53,6 +58,11 @@
 </tr>
 <tr>
 	<td>assertTextPresent</td>
+	<td>Symphony 1 part 1 (&quot;loon&quot;)</td>
+	<td></td>
+</tr>
+<tr>
+	<td>assertTextPresent</td>
 	<td>InfoLineTest123</td>
 	<td></td>
 </tr>
@@ -78,10 +88,24 @@
 </tr>
 <tr>
 	<td>assertTextPresent</td>
-	<td>Sorry, you're not allowed to see this </td>
+	<td>Sorry, you're not allowed to see this</td>
 	<td></td>
 </tr>
-
+<tr>
+	<td>clickAndWait</td>
+	<td>link=Edit My Profile</td>
+	<td></td>
+</tr>
+<tr>
+	<td>select</td>
+	<td>id=id_visible_to</td>
+	<td>label=All users</td>
+</tr>
+<tr>
+	<td>clickAndWait</td>
+	<td>//input[@value='Update']</td>
+	<td></td>
+</tr>
 </tbody></table>
 </body>
 </html>

@@ -8,6 +8,8 @@
 // IE5+, Mozilla 1.0+, and Netscape 6+
 //
 
+GMTDiff = 0;
+
 function requestsong(no) {
     $.get(ajaxurl+'song/'+no+'/queue/?'+ajaxeventid);
 }
@@ -153,7 +155,9 @@ function updateOnelinerElement(linkelement, data) {
     $(linkelement).find("img.ajaxload").remove();
     var desc = "<img class='popupscreen' src='"+data.data.thumbnail.sqDefault+"' style='float: right; padding:5px;'/>";
     desc = desc + data.data.title + " by " + data.data.uploader;
-    desc = desc + "<div class='ytpopupdata'>Rating : "+ data.data.rating.toPrecision(2)+"<br/> Duration : " + format_time(data.data.duration);
+    desc = desc + "<div class='ytpopupdata'>";
+    if (data.data.rating) {desc = desc + "Rating : "+ data.data.rating.toPrecision(2)+"<br/>";}
+    desc = desc + "Duration : " + format_time(data.data.duration);
     $(linkelement).qtip({
         "content": {
             "text": desc
@@ -208,8 +212,13 @@ function get_yt_info(video_id, callback, errorcallback) {
     if (!content) {
         $.getJSON(datagrab.replace("!YTID!", video_id), function(data) {
             if ((data) && (data.data)) {
-                localStorage.setItem(cachekey + video_id, JSON.stringify(data));
                 callback(data);
+                try {
+                    localStorage.setItem(cachekey + video_id, JSON.stringify(data));
+                } catch (err) {
+                    // Hack.. Shouldn't happen that often, but will clobber some other settings..
+                    localStorage.clear();
+                }
             } else {
                 if (errorcallback) {
                     errorcallback();
@@ -236,8 +245,95 @@ function updateOnelinerLinks() {
     });
 }
 
-$(document).ready( function() {
+function hookAjaxForms() {
+    $(".ajaxify").each(function (i, element) {
+        var E = $(element);
+        E.unbind("submit");
+        E.submit(function (eo) {
+            E.parent().addClass("ajax-working");
+            var url = E.attr("action");
+            $.post(url, E.serialize(), function(data) {
+                E.parent().removeClass("ajax-working");
+                if (data) { E.parent().replaceWith(data); }
+                hookAjaxForms();
+                hookStarHover();
+            });
+            return false;
+        });
+    });
+}
+
+function hookStarHover() {
+    $(".starbutton").unbind("hover");
+    $(".starbutton").hover(function () {
+        // Mouse hover
+        var t = $(this);
+        t.parent().find(".ajaxhax").val(t.val());
+        t.prevAll().andSelf().addClass("star-selected");
+        t.nextAll().removeClass("star-selected");
+    },
+    function () {
+        // Mouse out
+        var t = $(this);
+        var parent = t.parent();
+        var vote = parseInt(parent.data("vote"));
+        var elements = parent.find(".starbutton");
+        elements.removeClass("star-selected");
+
+        elements.each(function (i, elem) {
+            var E = $(elem);
+            if (i < vote) {
+                E.addClass("star-selected");
+            }
+        });
+    });
+}
+
+function applyHooks() {
     updateOnelinerLinks();
+    hookAjaxForms();
+    hookStarHover();
+    changeTime();
+}
+
+function intToStr(val) {
+    var val2 = val.toString();
+    if (val2.length < 2) { val2 = "0" + val2 }
+    return val2;
+}
+
+function changeTime() {
+    var d = new Date()
+    var gmtHours = -d.getTimezoneOffset()/60;
+    $(".tzinfo").each(function (i, elem) {
+        var E = $(elem);
+        var Eo = E.text();
+
+        var split = Eo.split(":");
+        var hr = parseInt(split[0], 10);
+        var min = parseInt(split[1], 10);
+
+        // Modulo js bug workaround
+        hr = (((hr - GMTDiff + gmtHours) % 24) + 24 ) % 24;
+
+        var str = intToStr(hr) + ":" + intToStr(min)
+        if ( split.length == 3 ) {
+            var sec = parseInt(split[2], 10);
+            str = str + ":" + intToStr(sec)
+        }
+        E.text(str);
+        var GMTmod = "";
+        if (GMTDiff > 0) {
+             GMTmod = "+";
+        }
+        E.attr("title", "Server time: " + Eo + " GMT " + GMTmod + GMTDiff);
+
+        E.removeClass("tzinfo");
+    });
+}
+
+$(document).ready( function() {
+    applyHooks();
     $(".ytlink").each( function(i, element) {
         var ytid = $(element).data("ytid");
         $(element).append("<img src='/static/ajax-loader.gif' />");

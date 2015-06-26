@@ -11,11 +11,11 @@
 <div class="olh_item">
 <div class="olh_user">
     <p>{{ display.user(line.user) }}<br />
-    {{ line.added|date("j M y H:i") }}</p>
+    {{ display.datetime(line.added) }}</p>
 </div>
 
 <div class="olh_message">
-    <p>{{ line.message|mksafe|bbcode_oneliner|smileys_oneliner|oneliner_mediaparse|bbcode_oneliner|dv_urlize }}</p>
+    <p>{{ display.format_oneliner(line) }}</p>
 </div>
 </div>{% endcache %}
 {% endfor %}

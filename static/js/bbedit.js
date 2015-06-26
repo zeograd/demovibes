@@ -1,11 +1,11 @@
 var bbOptions = {
     "buttons": [
-        {"name": "Bold", "button": "explicit.gif", "content": "[b]%s[/b]", "description": "Marks text as <strong>bold</strong>"},
-        {"name": "Italic", "button": "page_white_edit.png", "content": "[i]%s[/i]", "description": "Marks text as <i>italic</i>"},
-        {"name": "Big", "button": "add.png", "content": "[big]%s[/big]", "description": "Marks text as big"},
-        {"name": "Small", "button": "find.png", "content": "[small]%s[/small]", "description": "Marks text as small"},
-        {"name": "Code tag", "button": "comment.png", "content": "[code]%s[/code]", "description": "Marks text as code"},
-        {"name": "Quote", "button": "script.png", "content": "[quote]%s[/quote]", "description": "Marks text as quote"},
+        {"name": "Bold", "button": "text_bold.png", "content": "[b]%s[/b]", "description": "Marks text as <strong>bold</strong>"},
+        {"name": "Italic", "button": "text_italic.png", "content": "[i]%s[/i]", "description": "Marks text as <i>italic</i>"},
+        {"name": "Big", "button": "text_larger.png", "content": "[big]%s[/big]", "description": "Marks text as big"},
+        {"name": "Small", "button": "text_smaller.png", "content": "[small]%s[/small]", "description": "Marks text as small"},
+        {"name": "Code tag", "button": "script_code.png", "content": "[code]%s[/code]", "description": "Marks text as code"},
+        {"name": "Quote", "button": "comment.png", "content": "[quote]%s[/quote]", "description": "Marks text as quote"},
         {"name": "YouTube link", "button": "youtube_icon.png", "content": "[yt]%s[/yt]", "description": "Creates a link to a YouTube video <br/>Use video ID that is after v= in the URL"},
         {"name": "HTTP Url", "button": "world_link.png", "content": "[url]%s[/url]", "description": "Creates a web link. <br/>Link MUST start with http or ftp"},
         {"name": "Image embed", "button": "icon_screenshot.png", "content": "[img]%s[/img]", "description": "Embeds an image into the page"},
@@ -41,8 +41,8 @@ function createField(element) {
         });
         button.click(function (i) {
             var editval = editarea.val();
-            var selstart = editarea.attr("selectionStart");
-            var sellen = editarea.attr("selectionEnd") - selstart;
+            var selstart = editarea[0].selectionStart;
+            var sellen = editarea[0].selectionEnd - selstart;
             var selected = editval.substr(selstart, sellen);
             if (!selected) {
                 var inp2 = prompt("Value for "+ b.name + " tag");
@@ -50,11 +50,13 @@ function createField(element) {
                     selected = inp2;
                 }
             }
-            var input = b.content.replace("%s", selected);
-            editval = editval.substr(0, selstart) + input + editval.substr(selstart + sellen);
-            editarea.val(editval);
-            editarea.attr("selectionStart", selstart);
-            editarea.attr("selectionEnd", selstart + input.length);
+            if (selected) {
+             var input = b.content.replace("%s", selected);
+             editval = editval.substr(0, selstart) + input + editval.substr(selstart + sellen);
+             editarea.val(editval);
+             editarea[0].selectionStart = selstart;
+             editarea[0].selectionEnd = selstart + input.length;
+            }
         });
         editbar.append(button);
     });

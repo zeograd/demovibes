@@ -8,6 +8,9 @@ from django.conf import settings
 from django.contrib.sites.models import Site
 from django.template import Context
 
+import logging
+L = logging.getLogger("dv.webview.extend")
+
 from forum.models import Forum, Thread, Post
 import os.path, random
 
@@ -17,6 +20,15 @@ from jinja2 import contextfunction
 STATIC = settings.MEDIA_URL
 
 register = template.Library()
+
+def user_based_filter(userlist):
+    def func1(function):
+        def func2(data, user):
+            if user == None or user.username in userlist:
+                return function(data)
+            return data
+        return func2
+    return func1
 
 class BetterPaginator(Paginator):
     """
@@ -60,21 +72,6 @@ class BetterPaginator(Paginator):
         a.sort()
         return a
 
-    def old_pagerange(self, num_pages, page, range_gap=5):
-        """
-        Return current page +/- range_gap pages
-        """
-        if page > 5:
-            start = page-range_gap
-        else:
-            start = 1
-
-        if page < num_pages-range_gap:
-            end = page+range_gap+1
-        else:
-            end = num_pages+1
-        return range(start, end)
-
     def get_context(self, page, range_gap=3):
         try:
             page = int(page)
@@ -102,7 +99,7 @@ class BetterPaginator(Paginator):
         return context
 
 @contextfunction
-def paginate(context, obj, limit=None, maxpages=None):
+def paginate(context, obj, limit=None, maxpages=None, anchor=None):
     """
     Paginate object, return (paginated_objectlist, paging_html_code)
 
@@ -133,6 +130,7 @@ def paginate(context, obj, limit=None, maxpages=None):
     cntxt = {
         'query_string': query_dict.urlencode(),
         'paginator': pag,
+        'anchor': anchor,
     }
 
     paging = js.r2s('webview/t/paginate.html', cntxt)
@@ -354,11 +352,22 @@ def get_post_count(parser, token):
         raise template.TemplateSyntaxError, "%r tag requires one argument" % token.contents.split()[0]
     return GetPostCount(user)
 
-def user_css(user):
+def get_css_for_user(user):
     try:
-        return user.get_profile().get_css()
+        css = user.get_profile().get_css()
     except:
-        return getattr(settings, 'DEFAULT_CSS', "%sthemes/default/style.css" % STATIC)
+        css = None
+    if not css:
+        th = Theme.objects.all().order_by("-default")
+        if th:
+            css = th[0].css
+        else:
+            css = getattr(settings, 'DEFAULT_CSS', "%sthemes/default/style.css" % STATIC)
+    return css
+
+
+def user_css(user):
+    return get_css_for_user(user)
 
 @register.tag
 def css(parser, token):
@@ -679,11 +688,8 @@ class GetCss(template.Node):
         self.user = user
 
     def render(self, context):
-        try:
-            user = template.resolve_variable(self.user, context)
-            return user.get_profile().get_css()
-        except:
-            return getattr(settings, 'DEFAULT_CSS', "%sthemes/default/style.css" % STATIC)
+        user = template.resolve_variable(self.user, context)
+        return get_css_for_user(user)
 
 def j_get_post_count(user):
     return Post.objects.filter(author=user).count()
@@ -777,15 +783,7 @@ def get_song_queue_tag_j(origsong):
 def get_song_queue_tag(song_id):
     try:
         song_obj = Song.objects.get(id = song_id)
-        artists = song_obj.get_metadata().artists
-
-        T = loader.get_template('webview/queue_tag.html')
-        C = Context({ 'song' : song_obj, 'artists' : artists })
-        mu = T.render(C)
-
-        mu = js.r2s('webview/queue_tag.html', { 'song' : song_obj, 'artists' : artists })
-
-        return mu
+        return get_song_queue_tag_j(song_obj)
     except:
         return unicode(song_id)
 
@@ -826,7 +824,7 @@ def bb_artist(hit):
 
         return mu
     except:
-        return "[artist]%s[/artist]" % artistid
+        return u"[artist]%s[/artist]" % artistid
 
 def bb_queue(hit):
     """
@@ -850,7 +848,7 @@ def bb_queue(hit):
         'MEDIA_URL' : STATIC,
         })
 
-    result = t.render(c)
+    #result = t.render(c)
 
     result = js.r2s('webview/queue_tag.html', {
         'song' : song,
@@ -868,7 +866,7 @@ def bb_song(hit):
         songid = hit.group(1)
         song = Song.objects.get(id=songid)
     except:
-        return "[song]%s[/song]" % songid
+        return u"[song]%s[/song]" % songid
 
     # Use the existing Songname template already present in code
     t = loader.get_template('webview/t/songname.html')
@@ -881,6 +879,27 @@ def bb_song(hit):
 
     return mu
 
+def get_flag_path(flag):
+    flag = flag.encode('ascii', 'ignore').lower()
+
+    if not flag.isalnum():
+        flag = ""
+
+    if flag and os.path.isfile(os.path.join(settings.DOCUMENT_ROOT, "flags", "%s.png" % flag)):
+        return u"<img src='%sflags/%s.png' class='countryflag' alt='flag' title='%s' />" % (STATIC, flag, flag)
+
+    # No flag image found, so default to Necta flag
+    DEFAULT_FLAG = getattr(settings, "DEFAULT_FLAG", "nectaflag")
+    return u"<img src='%sflags/%s.png' class='countryflag' title='flag' />" % (STATIC, DEFAULT_FLAG)
+
+def bb_theme(hit):
+    try:
+        t = Theme.objects.get(id=int(hit.group(1)))
+        return u"<a href='%s' title='Theme'>%s</a>" % (t.get_absolute_url(), t.title)
+    except:
+        L.exception("Theme select failed")
+        return u"[]"
+
 def bb_flag(hit):
     """
     Allow forum post to return a flag code. Uses standard 2-digit flag code
@@ -888,13 +907,9 @@ def bb_flag(hit):
     Nectaflag is used. Flag created for me by sark76 (Mark Huther). AAK
     """
     flagcode = hit.group(1)
-    flag = flagcode.lower().encode('ascii', 'ignore')
+    #flag = flagcode.lower().encode('ascii', 'ignore')
 
-    if os.path.isfile(os.path.join(settings.DOCUMENT_ROOT, "flags", "%s.png" % flag)):
-        return "<img src='%sflags/%s.png' class='countryflag' alt='flag' title='%s' />" % (STATIC, flag, flag)
-
-    # No flag image found, so default to Necta flag
-    return "<img src='%sflags/nectaflag.png' class='countryflag' title='flag' />" % (STATIC)
+    return get_flag_path(flagcode)
 
 def bb_user(hit):
     """
@@ -915,7 +930,7 @@ def bb_user(hit):
     except:
         # This is normally thrown when the user is invalid. Return the original result,
         # Only we add an icon to indicate an invalid user.
-        return '<img src="'+ STATIC + 'user_error.png" alt="user" border="0" />%s' % (user)
+        return '<img src="%suser_error.png" alt="user" border="0" />%s' % (STATIC, user)
 
 def bb_artistname(hit):
     """
@@ -933,7 +948,7 @@ def bb_artistname(hit):
     except:
         # This is normally thrown when the artist is invalid. Return the original result,
         # Only we add an icon to indicate an invalid artist.
-        return '<img src="'+ STATIC + 'user_error.png" alt="artist" border="0" /> %s' % (artist)
+        return u'<img src="%suser_error.png" alt="artist" border="0" /> %s' % (STATIC, artist)
 
 def bb_group(hit):
     """
@@ -967,7 +982,7 @@ def bb_groupname(hit):
     except:
         # This is normally thrown when the group is invalid. Return the original result,
         # Only we add an icon to indicate an invalid group.
-        return '<img src="'+ STATIC + 'user_error.png" alt="user" border="0" /> %s' % (group)
+        return u'<img src="%suser_error.png" alt="user" border="0" /> %s' % (STATIC, group)
 
 def bb_label(hit):
     """
@@ -1001,7 +1016,7 @@ def bb_labelname(hit):
         return T.render(C)
     except:
         # This will throw if the requested label is spelt incorrectly, or doesnt exist
-        return '<img src="'+ STATIC + 'transmit.png" alt="Invalid Label" border="0" /> %s' % (real_name)
+        return u'<img src="'+ STATIC + 'transmit.png" alt="Invalid Label" border="0" /> %s' % (real_name)
 
 def bb_platform(hit):
     """
@@ -1035,7 +1050,7 @@ def bb_platformname(hit):
         return T.render(C)
     except:
         # This will throw if the requested platform is spelt incorrectly, or doesnt exist
-        return '[platform]%s[/platform]' % (plat_name)
+        return u'[platform]%s[/platform]' % (plat_name)
 
 def bb_thread(hit):
     """
@@ -1045,9 +1060,9 @@ def bb_thread(hit):
     try:
         post_id = hit.group(1)
         t = Thread.objects.get(id=post_id)
-        return '<a href="%s"><img src="%snewspaper.png" alt="forum" border="0" /> %s</a>' % (t.get_absolute_url(), STATIC, t)
+        return u'<a href="%s"><img src="%snewspaper.png" alt="forum" border="0" /> %s</a>' % (t.get_absolute_url(), STATIC, t)
     except:
-        return "[thread]%s[/thread]" % (post_id)
+        return u"[thread]%s[/thread]" % (post_id)
 
 def bb_forum(hit):
     """
@@ -1056,9 +1071,9 @@ def bb_forum(hit):
     try:
         forum_slug = hit.group(1)
         f = Forum.objects.get(slug=forum_slug)
-        return '<a href="%s"><img src="%snewspaper.png" alt="forum" border="0" /> %s</a>' % (f.get_absolute_url(), STATIC, f)
+        return u'<a href="%s"><img src="%snewspaper.png" alt="forum" border="0" /> %s</a>' % (f.get_absolute_url(), STATIC, f)
     except:
-        return "[forum]%s[/forum]" % (forum_slug)
+        return u"[forum]%s[/forum]" % (forum_slug)
 
 def bb_size(hit):
     """
@@ -1077,13 +1092,13 @@ def bb_size(hit):
     # Users requesting a size too small to be visible, or too large and take up the whole screen!
     # This could eventually go into the settings.py file, hehe.
     if(int(size) < minimum):
-        return '<span style="font-size: %dpx">%s [Too Small, Upscaled To 6]</span>' % (minimum, text)
+        return u'<span style="font-size: %dpx">%s [Too Small, Upscaled To 6]</span>' % (minimum, text)
 
     if(int(size) > maximum):
-        return '<span style="font-size: %dpx">%s [Too Large, Reduced To 50]</span>' % (maximum, text)
+        return u'<span style="font-size: %dpx">%s [Too Large, Reduced To 50]</span>' % (maximum, text)
 
     # Return the normal text size
-    return '<span style="font-size: %dpx">%s</span>' % (int(size), text)
+    return u'<span style="font-size: %dpx">%s</span>' % (int(size), text)
 
 def bb_youtube(hit):
     """
@@ -1130,7 +1145,7 @@ def bb_compilation_name(hit):
         Co = Context({'C' : C})
         return T.render(Co)
     except:
-        return '[album]%s[/album]' % (comp)
+        return u'[album]%s[/album]' % (comp)
 
 def bb_faq(hit):
     """
@@ -1139,11 +1154,13 @@ def bb_faq(hit):
     faqq = hit.group(1)
     try:
         F = Faq.objects.get(id=faqq)
+        return js.r2s('webview/t/faq_question.html', {'F' : F})
+
         T = loader.get_template('webview/t/faq_question.html')
         Q = Context({'F' : F})
         return T.render(Q)
     except:
-        return '[faq]%s[/faq]' % (faqq)
+        return u'[faq]%s[/faq]' % (faqq)
 
 def bb_youtube_ol(hit):
     """
@@ -1151,13 +1168,13 @@ def bb_youtube_ol(hit):
     Tag like so: [yt]S-T8h0T0SK8[/yt]. This version is oneliner specific
     """
     video = hit.group(1)
-    return '<a class="ytlinkol" data-ytid="%s" href="http://www.youtube.com/watch?v=%s" target="_blank"><img src="%syoutube_icon.png" title="YouTube" alt="YouTube" border="0" /> <span class="yttitle">YouTube Link</span></a>' % (video, video, STATIC)
+    return u'<a class="ytlinkol" data-ytid="%s" href="http://www.youtube.com/watch?v=%s" target="_blank"><img src="%syoutube_icon.png" title="YouTube" alt="YouTube" border="0" /> <span class="yttitle">YouTube Link</span></a>' % (video, video, STATIC)
 
 def bb_googlevideo_ol(hit):
     """
     """
     video = hit.group(1)
-    return '<a href="http://video.google.com/videoplay?docid=%s" target="_blank"><img src="%sgooglevideo_icon.png" title="Google Video" alt="Google Video" border="0"> Google Video Link</a>' % (video, STATIC)
+    return u'<a href="http://video.google.com/videoplay?docid=%s" target="_blank"><img src="%sgooglevideo_icon.png" title="Google Video" alt="Google Video" border="0"> Google Video Link</a>' % (video, STATIC)
 
 def bb_youtube_name_ol(hit):
     """
@@ -1168,7 +1185,7 @@ def bb_youtube_name_ol(hit):
     video = hit.group(1)
     title = hit.group(2)
 
-    return '<a href="http://www.youtube.com/watch?v=%s" target="_blank"><img src="%syoutube_icon.png" title="YouTube" alt="YouTube" border="0"> %s</a>' % (title, STATIC, video)
+    return u'<a href="http://www.youtube.com/watch?v=%s" target="_blank"><img src="%syoutube_icon.png" title="YouTube" alt="YouTube" border="0"> %s</a>' % (title, STATIC, video)
 
 def bb_gvideo(hit):
     """
@@ -1176,7 +1193,7 @@ def bb_gvideo(hit):
     We still add the video in pretty mush the same way: [gvideo]1199004375595376444[/gvideo]
     """
     video = hit.group(1)
-    return '<object width="400" height="326"><param name="movie" value="http://video.google.com/googleplayer.swf?docId=%s"></param><param name="wmode" value="transparent"></param><embed src="http://video.google.com/googleplayer.swf?docId=%s" wmode="transparent" style="width:400px; height:326px;" id="VideoPlayback" type="application/x-shockwave-flash" flashvars=""></embed></object>' % ( video, video )
+    return u'<object width="400" height="326"><param name="movie" value="http://video.google.com/googleplayer.swf?docId=%s"></param><param name="wmode" value="transparent"></param><embed src="http://video.google.com/googleplayer.swf?docId=%s" wmode="transparent" style="width:400px; height:326px;" id="VideoPlayback" type="application/x-shockwave-flash" flashvars=""></embed></object>' % ( video, video )
 
 @register.filter
 def oneliner_mediaparse(value):
@@ -1184,7 +1201,7 @@ def oneliner_mediaparse(value):
     """
     medialinks = [
         # YouTube auto scraping
-        (r'(^|\s)https?://(www\.|)youtube.com/(watch/?\?v=|v/)([\w;&=#-]+)', r'[yt]\4[/yt]'),
+        (r'(?:^|\s)https?://(?:(?:www\.)?youtube\.com/(?:watch/?\?(?:v=|[^&]+&v=)|v/)|youtu\.be/)([\w;&=#-]+)', r'[yt]\1[/yt]'),
         # Google Video Scraping
         (r'(^|\s)http://video.google.com/videoplay\?docid=([\w&;=-]+)', r'[gv]\2[/gv]'),
     ]
@@ -1194,6 +1211,14 @@ def oneliner_mediaparse(value):
         value = p.sub(mset[1], value)
 
     return value
+
+REMSM = re.compile(r':\w+:', re.I)
+
+@register.filter
+def removesmileys(value):
+    value = REMSM.sub("", value)
+    return value
+
 
 @register.filter
 def bbcode(value):
@@ -1245,17 +1270,9 @@ def wordwrap(value, arg=80):
     """
     return "\n".join(textwrap.wrap(value, int(arg)))
 
-@register.filter
-def smileys_oneliner(value):
-    """
-    Replaces smiley text with images. First, do secret smileys so we can replace
-    Smileys pre-converted with others later.
-    """
-
+def smiley_general(value, smileys, PER_SMILEY=0, TOTAL_SMILEY=None):
     num_smileys = 0
-    PER_SMILEY = getattr(settings, "ONELINER_PER_SMILEY_LIMIT", 0)
-    TOTAL_SMILEY = getattr(settings, "ONELINER_TOTAL_SMILEY_LIMIT", None)
-    for bbset in SMILEYS:
+    for bbset in smileys:
         p = bbset[0]
         (value, nr) = p.subn(bbset[1], value, PER_SMILEY)
         num_smileys = num_smileys + nr
@@ -1264,22 +1281,38 @@ def smileys_oneliner(value):
     return value
 
 @register.filter
+def smileys_oneliner(value):
+    """
+    Replaces smiley text with images. First, do secret smileys so we can replace
+    Smileys pre-converted with others later.
+    """
+    PER_SMILEY = getattr(settings, "ONELINER_PER_SMILEY_LIMIT", 0)
+    TOTAL_SMILEY = getattr(settings, "ONELINER_TOTAL_SMILEY_LIMIT", None)
+    return smiley_general(value, SMILEYS, PER_SMILEY, TOTAL_SMILEY)
+
+@user_based_filter(getattr(settings,'RESTRICTED_SMILEYS_USERS', []))
+def smileys_restricted(value):
+    return smiley_general(value, RESTRICTED_SMILEYS)
+
+def custom_filters(value, line):
+    r = getattr(settings, "CUSTOM_ONELINER_FILTERS", [])
+    for gid, func in r:
+        if gid == "*" or line.user.groups.filter(id=gid).exists():
+            try:
+                value = func(value, line)
+            except:
+                L.exception("Failed filtering user %s message: %s", line.user, value)
+    return value
+
+@register.filter
 def smileys(value):
     """
     Replaces smiley text with images. First, do secret smileys so we can replace
     Smileys pre-converted with others later.
     """
-
-    num_smileys = 0
     PER_SMILEY = getattr(settings, "OTHER_PER_SMILEY_LIMIT", 0)
     TOTAL_SMILEY = getattr(settings, "OTHER_TOTAL_SMILEY_LIMIT", None)
-    for bbset in SMILEYS:
-        p = bbset[0]
-        (value, nr) = p.subn(bbset[1], value, PER_SMILEY)
-        num_smileys = num_smileys + nr
-        if TOTAL_SMILEY and TOTAL_SMILEYS <= num_smileys:
-            return value
-    return value
+    return smiley_general(value, SMILEYS, PER_SMILEY, TOTAL_SMILEY)
 
 @register.filter
 def flag(value):
@@ -1288,11 +1321,7 @@ def flag(value):
     Used. Flag was created for me by sark76 (Mark Huther). AAK
     """
     flag = value.lower().encode('ascii', 'ignore')
-    if os.path.isfile(os.path.join(settings.DOCUMENT_ROOT, "flags", "%s.png" % flag)):
-        return "<img src='%sflags/%s.png' class='countryflag' alt='flag' title='%s' />" % (STATIC, flag, flag)
-
-    # No flag image found, return the Necta flag hehe
-    return "<img src='%sflags/nectaflag.png' class='countryflag' alt='flag' />" % (STATIC)
+    return get_flag_path(flag)
 
 @register.filter
 def getattrs (obj, args):
@@ -1328,8 +1357,8 @@ def dv_urlize(text):
     Simplified replacement of the urlize filter in Django, which at present offers no option
     To allow a link to open in a new tab/window. AAK.
     """
-    part1 = re.compile(r"(^|[\n ])(((news|telnet|nttp|irc|http|ftp|https)://[\w\#$%&~.\-;:=,?@\[\]+]*)(/[\w\#$%&~/.\-;:=,?@\[\]+]*)?)", re.IGNORECASE | re.DOTALL)
-    part2 = re.compile(r"(^|[\n ])(((www|ftp)\.[\w\#$%&~.\-;:=,?@\[\]+]*)(/[\w\#$%&~/.\-;:=,?@\[\]+]*)?)", re.IGNORECASE | re.DOTALL)
+    part1 = re.compile(r"(^|[\n ])(((news|telnet|nttp|irc|http|ftp|https)://[\w\#$%&~.\-;:=,?@\[\]+]*)(/[\w\#$%&~/.\-;:=,?@\(\)\[\]+]*)?)", re.IGNORECASE | re.DOTALL)
+    part2 = re.compile(r"(^|[\n ])(((www|ftp)\.[\w\#$%&~.\-;:=,?@\[\]+]*)(/[\w\#$%&~/.\-;:=,\(\)?@\[\]+]*)?)", re.IGNORECASE | re.DOTALL)
 
     # Make a quick copy of our variable to work with
     link = text
@@ -1352,29 +1381,17 @@ def dv_urlize(text):
     # Return the results of the conversion
     return link
 
-bbdata_oneliner = [
-        (r'\[url\]((http|https|ftp|/):.+?)\[/url\]', r'<a href="\1" target="_blank">\1</a>'),
+
+bbdata_shared = [
+        (r'\[url\]((http|https|ftp|/).+?)\[/url\]', r'<a href="\1" target="_blank">\1</a>'),
         (r'\[url=((http|https|ftp|/).+?)\](.+?)\[/url\]', r'<a href="\1" target="_blank">\3</a>'),
         (r'\[email\](.+?)\[/email\]', r'<a href="mailto:\1">\1</a>'),
         (r'\[email=(.+?)\](.+?)\[/email\]', r'<a href="mailto:\1">\2</a>'),
-
-        # img test is a little modified for oneliner. Using a baseheight of 20
-        # Pixels, we scale the image proportionally. The outcome of the tag is a
-        # Clickable thiumbnail, which opens in a new tab.
-
-        # This can be abused too much right now, commenting out
-        #(r'\[img\](.+?)\[/img\]', r'<a href="\1" target="_blank"><img src="\1" height="20" alt="" \></a>'),
-        #(r'\[img=(.+?)\](.+?)\[/img\]', r'<a href="\1" target="_blank"><b>\2</b> <img src="\1" alt="" height="20" \></a>'),
-
-        # Standard text display tags for bold, underline etc.
+                # Standard text display tags for bold, underline etc.
         (r'\[b\](.+?)\[/b\]', r'<strong>\1</strong>'),
         (r'\[i\](.+?)\[/i\]', r'<i>\1</i>'),
         (r'\[u\](.+?)\[/u\]', r'<u>\1</u>'),
         (r'\[s\](.+?)\[/s\]', r'<s>\1</s>'),
-
-        # Big and Small might be taken out of oneliner, we'll see how they are used.
-        (r'\[big\](.+?)\[/big\]', r'<big>\1</big>'),
-        (r'\[small\](.+?)\[/small\]', r'<small>\1</small>'),
 
         # Standard colour tags for use in the oneliner. Most basic colours are pre-made
         # For ease of use. Feel free to add new colours.
@@ -1398,96 +1415,69 @@ bbdata_oneliner = [
         # Colour code in the form of #00FF00 to be used. Handy for text effects.
         (r'\[color=#([0-9A-Fa-f]{6})\](.+?)\[/color\]', r'<span style="color:"\1;">\2</span>'),
 
+        # Demovibes specific BB tags
+        (r'\[user\](.+?)\[/user\]', bb_user), #1
+        (r'\[song\](\d+?)\[/song\]', bb_song), #1
+        (r'\[artist\](\d+?)\[/artist\]', bb_artist), #1
+        (r'\[artist\](.+?)\[/artist\]', bb_artistname), #1
+        (r'\[flag\](.+?)\[/flag\]', bb_flag),
+        (r'\[thread\](\d+?)\[/thread\]', bb_thread), #1
+        (r'\[forum\](.+?)\[/forum\]', bb_forum), #1
+        (r'\[group\](\d+?)\[/group\]', bb_group), #1
+        (r'\[group\](.+?)\[/group\]', bb_groupname), #1
+        (r'\[album\](\d+?)\[/album\]', bb_compilation), #1
+        (r'\[compilation\](\d+?)\[/compilation\]', bb_compilation), #1
+        (r'\[album\](.+?)\[/album\]', bb_compilation_name), #1
+        (r'\[compilation\](.+?)\[/compilation\]', bb_compilation_name),#1
+        (r'\[label\](\d+?)\[/label\]', bb_label), #1
+        (r'\[label\](.+?)\[/label\]', bb_labelname), #1
+        (r'\[platform\](\d+?)\[/platform\]', bb_platform), #1
+        (r'\[platform\](.+?)\[/platform\]', bb_platformname), #1
+        (r'\[faq\](\d+?)\[/faq\]', bb_faq), #1
+        (r'\[theme\](\d+?)\[/theme\]', bb_theme), #1
+]
+
+bbdata_oneliner = bbdata_shared + [
+        # Big and Small might be taken out of oneliner, we'll see how they are used.
+        (r'\[big\](.+?)\[/big\]', r'<big>\1</big>'),
+        (r'\[small\](.+?)\[/small\]', r'<small>\1</small>'),
+
+
+        #Rather silly stuff, really
+        (r'\[silly1\](.+?)\[/silly1\]', r'<span class="silly1">\1</span>'),
+        (r'\[silly2\](.+?)\[/silly2\]', r'<span class="silly2">\1</span>'),
+        (r'\[silly3\](.+?)\[/silly3\]', r'<span class="silly3">\1</span>'),
+        (r'\[silly4\](.+?)\[/silly4\]', r'<span class="silly4">\1</span>'),
+        (r'\[silly5\](.+?)\[/silly5\]', r'<span class="silly5">\1</span>'),
+
         # Video Linking Tags
         (r'\[yt\](.+?)\[/yt\]', bb_youtube_ol),
         (r'\[yt=(.+?)\](.+?)\[/yt\]', bb_youtube_name_ol),
         (r'\[gv\](.+?)\[/gv\]', bb_googlevideo_ol),
 
-        # Demovibes specific tags
-        (r'\[user\](.+?)\[/user\]', bb_user),
-        (r'\[song\](\d+?)\[/song\]', bb_song),
-        (r'\[artist\](\d+?)\[/artist\]', bb_artist),
-        (r'\[artist\](.+?)\[/artist\]', bb_artistname),
-        #(r'\[queue\](\d+?)\[/queue\]', bb_queue), # Looks annoying in OneLiner
-        (r'\[flag\](.+?)\[/flag\]', bb_flag),
-        (r'\[thread\](\d+?)\[/thread\]', bb_thread),
-        (r'\[forum\](.+?)\[/forum\]', bb_forum),
-        (r'\[group\](\d+?)\[/group\]', bb_group),
-        (r'\[group\](.+?)\[/group\]', bb_groupname),
-        (r'\[album\](\d+?)\[/album\]', bb_compilation),
-        (r'\[compilation\](\d+?)\[/compilation\]', bb_compilation),
-        (r'\[album\](.+?)\[/album\]', bb_compilation_name),
-        (r'\[compilation\](.+?)\[/compilation\]', bb_compilation_name),
-        (r'\[label\](\d+?)\[/label\]', bb_label),
-        (r'\[label\](.+?)\[/label\]', bb_labelname),
-        (r'\[platform\](\d+?)\[/platform\]', bb_platform),
-        (r'\[platform\](.+?)\[/platform\]', bb_platformname),
-    (r'\[faq\](\d+?)\[/faq\]', bb_faq),
       ]
 
-bbdata_full = [
-        (r'\[url\]((http|https|ftp|/).+?)\[/url\]', r'<a href="\1" target="_blank">\1</a>'),
-        (r'\[url=((http|https|ftp|/).+?)\](.+?)\[/url\]', r'<a href="\1" target="_blank">\3</a>'),
-        (r'\[email\](.+?)\[/email\]', r'<a href="mailto:\1">\1</a>'),
-        (r'\[email=(.+?)\](.+?)\[/email\]', r'<a href="mailto:\1">\2</a>'),
+bbdata_full = bbdata_shared + [
+
         (r'\[img\](.+?\.(jpg|jpeg|png|gif|bmp))\[/img\]', r'<img src="\1" alt="" />'),
         (r'\[img=(.+?\.(jpg|jpeg|png|gif|bmp))\](.+?)\[/img\]', r'<a href="\1" target="_blank"><b>\3</b><br /><img src="\1" alt="" /></a>'),
 
-        (r'\[b\](.+?)\[/b\]', r'<strong>\1</strong>'),
-        (r'\[i\](.+?)\[/i\]', r'<i>\1</i>'),
-        (r'\[u\](.+?)\[/u\]', r'<u>\1</u>'),
-        (r'\[s\](.+?)\[/s\]', r'<s>\1</s>'),
+
         (r'\[quote=(.+?)\](.+?)\[/quote\]', r'<div class="bbquote"><b>\1 said:</b> "\2"</div>'),
         (r'\[quote\](.+?)\[/quote\]', r'<div class="bbquote"><b>Quote:</b> "\1"</div>'),
         (r'\[center\](.+?)\[/center\]', r'<div>\1</div>'),
         (r'\[code\](.+?)\[/code\]', r'<tt class="bbcode">\1</tt>'),
         (r'\[big\](.+?)\[/big\]', r'<big>\1</big>'),
         (r'\[small\](.+?)\[/small\]', r'<small>\1</small>'),
-        (r'\[size=(.+?)\](.+?)\[/size\]', bb_size),
+        (r'\[size=(\d+)\](.+?)\[/size\]', bb_size),
         (r'\[pre\](.+?)\[/pre\]', r'<pre class="bbpre">\1</pre>'),
-
-        (r'\[red\](.+?)\[/red\]', r'<span style="color: red">\1</span>'),
-        (r'\[green\](.+?)\[/green\]', r'<span style="color: green">\1</span>'),
-        (r'\[blue\](.+?)\[/blue\]', r'<span style="color: blue">\1</span>'),
-        (r'\[black\](.+?)\[/black\]', r'<span style="color: black">\1</span>'),
-        (r'\[brown\](.+?)\[/brown\]', r'<span style="color: brown">\1</span>'),
-        (r'\[cyan\](.+?)\[/cyan\]', r'<span style="color: cyan">\1</span>'),
-        (r'\[darkblue\](.+?)\[/darkblue\]', r'<span style="color: darkblue">\1</span>'),
-        (r'\[gold\](.+?)\[/gold\]', r'<span style="color: gold">\1</span>'),
-        (r'\[grey\](.+?)\[/grey\]', r'<span style="color: gray">\1</span>'),
-        (r'\[magenta\](.+?)\[/magenta\]', r'<span style="color: magenta">\1</span>'),
-        (r'\[orange\](.+?)\[/orange\]', r'<span style="color: orange">\1</span>'),
-        (r'\[pink\](.+?)\[/pink\]', r'<span style="color: pink">\1</span>'),
-        (r'\[purple\](.+?)\[/purple\]', r'<span style="color: purple">\1</span>'),
-        (r'\[white\](.+?)\[/white\]', r'<span style="color: white">\1</span>'),
-        (r'\[yellow\](.+?)\[/yellow\]', r'<span style="color: yellow">\1</span>'),
-        (r'\[color=#(.+?)\](.+?)\[/color\]', r'<span style="color: #\1">\2</span>'),
 
         (r'\[table\](.+?)\[/table\]', r'<table class="bbtable">\1</table>'),
         (r'\[th\](.+?)\[/th\]', r'<th>\1</th>'),
         (r'\[td\](.+?)\[/td\]', r'<td>\1</td>'),
         (r'\[tr\](.+?)\[/tr\]', r'<tr>\1</tr>'),
 
-        # Demovibes specific BB tags
-        (r'\[user\](.+?)\[/user\]', bb_user),
-        (r'\[song\](\d+?)\[/song\]', bb_song),
-        (r'\[artist\](\d+?)\[/artist\]', bb_artist),
-        (r'\[artist\](.+?)\[/artist\]', bb_artistname),
         (r'\[queue\](\d+?)\[/queue\]', bb_queue),
-        (r'\[flag\](.+?)\[/flag\]', bb_flag),
-        (r'\[thread\](\d+?)\[/thread\]', bb_thread),
-        (r'\[forum\](.+?)\[/forum\]', bb_forum),
-        (r'\[group\](\d+?)\[/group\]', bb_group),
-        (r'\[group\](.+?)\[/group\]', bb_groupname),
-        (r'\[album\](\d+?)\[/album\]', bb_compilation),
-        (r'\[compilation\](\d+?)\[/compilation\]', bb_compilation),
-        (r'\[album\](.+?)\[/album\]', bb_compilation_name),
-        (r'\[compilation\](.+?)\[/compilation\]', bb_compilation_name),
-        (r'\[label\](\d+?)\[/label\]', bb_label),
-        (r'\[label\](.+?)\[/label\]', bb_labelname),
-        (r'\[platform\](\d+?)\[/platform\]', bb_platform),
-        (r'\[platform\](.+?)\[/platform\]', bb_platformname),
-    (r'\[faq\](\d+?)\[/faq\]', bb_faq),
 
         # Experimental BBCode tags
         (r'\[youtube\](.+?)\[/youtube\]', bb_youtube),
@@ -1495,25 +1485,26 @@ bbdata_full = [
         (r'\[gvideo\](.+?)\[/gvideo\]', bb_gvideo),
     ]
 
-def make_smileys():
+def make_smileys(smiley_list):
 
     def make_re(thesmiley):
         return re.compile(r'(?:^|(?<=\s|<|>|:))%s(?=$|\s|<|>|:)' % re.escape(thesmiley), re.IGNORECASE)
 
     r = []
-    secretsmileys = getattr(settings,'SECRETSMILEYS', [])
-    smileys = settings.SMILEYS
-    for smiley in secretsmileys:
+    #secretsmileys = getattr(settings,'SECRETSMILEYS', [])
+    smileys = smiley_list
+    for smiley in smiley_list:
         sm = make_re(smiley[0])
-        v = r'<img src="%s" title="%s" />' % (STATIC + smiley[1], smiley[2])
-        r.append((sm, v))
-    for smiley in smileys:
-        sm = make_re(smiley[0])
-        v = r'<img src="%s" title="%s" />' % (STATIC + smiley[1], smiley[0])
+        if len(smiley) == 3:
+            v = r'<img src="%s" title="%s" />' % (STATIC + smiley[1], smiley[2])
+        else:
+            v = r'<img src="%s" title="%s" />' % (STATIC + smiley[1], smiley[0])
         r.append((sm, v))
     return r
 
-SMILEYS = make_smileys()
+SMILEYS = make_smileys(settings.SMILEYS) + make_smileys(getattr(settings,'SECRETSMILEYS', []))
+
+RESTRICTED_SMILEYS = make_smileys(getattr(settings,'RESTRICTED_SMILEYS', []))
 
 def reify(bblist):
     templist = []
