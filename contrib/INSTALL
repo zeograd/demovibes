@@ -2,12 +2,12 @@
 Packages needed:
  lame libboost-dev libsamplerate-dev libicu-dev = demosauce
 
- pil (python imaging library) - check that libjpeg and libzlib is installed, otherwise you will miss jpeg / png support
+ pillow (python imaging library) - check that libjpeg and libzlib is installed, otherwise you will miss jpeg / png support
 
 Create python virtual environment:
  Install pip (python package install program)
  Install virtualenv (can use "pip install virtualenv" if you want)
- To ceate virtual env : pip install -E demovibesenv -U -r demovibes/contrib/requirements.txt
+ To create virtual env : pip install -E demovibesenv -U -r demovibes/requirements/local.txt
  To activate virt env : source demovibesenv/bin/activate
 
 Look over / change settings
