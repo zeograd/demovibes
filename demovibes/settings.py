@@ -68,12 +68,12 @@ HAYSTACK_SITECONF = 'demovibes.search_sites'
 HAYSTACK_SEARCH_ENGINE = "whoosh"
 HAYSTACK_WHOOSH_PATH = pj("local","whoosh")
 
-DATABASE_ENGINE = 'sqlite3'           # 'postgresql_psycopg2', 'postgresql', 'mysql', 'sqlite3' or 'oracle'.
-DATABASE_NAME = pj('sqlite.db')             # Or path to database file if using sqlite3.
-DATABASE_USER = ''             # Not used with sqlite3.
-DATABASE_PASSWORD = ''         # Not used with sqlite3.
-DATABASE_HOST = ''             # Set to empty string for localhost. Not used with sqlite3.
-DATABASE_PORT = ''             # Set to empty string for default. Not used with sqlite3.
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': pj('sqlite.db'),
+    }
+}
 
 # Search results per type (group, artist, songs)
 SEARCH_LIMIT = 40
@@ -245,12 +245,7 @@ USE_I18N = True
 
 # Absolute path to the directory that holds media.
 # Example: "/home/media/media.lawrence.com/"
-MEDIA_ROOT = DOCUMENT_ROOT = pj('static')
-
-# URL that handles the media served from MEDIA_ROOT. Make sure to use a
-# trailing slash if there is a path component (optional in other cases).
-# Examples: "http://media.lawrence.com", "http://example.com/media/"
-MEDIA_URL = '/static/'
+DOCUMENT_ROOT = pj('static')
 
 # URL prefix for admin media -- CSS, JavaScript and images. Make sure to use a
 # trailing slash.
@@ -355,11 +350,14 @@ UPLOADED_SONG_COUNT = 150
 SHORTEN_ONELINER_LINKS = 0
 
 TEMPLATE_CONTEXT_PROCESSORS = (
-    "django.core.context_processors.auth",
+    "django.contrib.auth.context_processors.auth",
+    "django.contrib.messages.context_processors.messages",
     "django.core.context_processors.debug",
     "django.core.context_processors.i18n",
+    "django.core.context_processors.static",
     "django.core.context_processors.media",
     "django.core.context_processors.request",
+    "django.core.context_processors.tz",
     'django_authopenid.context_processors.authopenid',
 )
 
@@ -370,6 +368,8 @@ INSTALLED_APPS = [
     'django.contrib.sites',
     'django.contrib.admin',
     'django.contrib.admindocs',
+    'django.contrib.staticfiles',
+    'demovibes_theme',
     'demovibes.webview',
     'demovibes.registration',
     'demovibes.forum',
@@ -414,6 +414,35 @@ except:
 # but when I tested it I didn't see any
 # in django it looks like that: if content_length > settings.FILE_UPLOAD_MAX_MEMORY_SIZE
 FILE_UPLOAD_MAX_MEMORY_SIZE = -1
+
+
+# List of finder classes that know how to find static files in
+# various locations.
+STATICFILES_FINDERS = (
+    "django.contrib.staticfiles.finders.FileSystemFinder",
+    "django.contrib.staticfiles.finders.AppDirectoriesFinder",
+#    'django.contrib.staticfiles.finders.DefaultStorageFinder',
+)
+
+# URL prefix for static files.
+# Example: "http://media.lawrence.com/static/"
+STATIC_URL = "/static/"
+
+# Absolute path to the directory static files should be collected to.
+# Don't put anything in this directory yourself; store your static files
+# in apps' "static/" subdirectories and in STATICFILES_DIRS.
+# Example: "/home/media/media.lawrence.com/static/"
+STATIC_ROOT = pj("static")
+
+# URL that handles the media served from MEDIA_ROOT. Make sure to use a
+# trailing slash.
+# Examples: "http://media.lawrence.com/media/", "http://example.com/media/"
+MEDIA_URL = STATIC_URL + "media/"
+
+# Absolute filesystem path to the directory that will hold user-uploaded files.
+# Example: "/home/media/media.lawrence.com/media/"
+MEDIA_ROOT = pj("static", "media")
+
 
 try:
     from settings_local import *
