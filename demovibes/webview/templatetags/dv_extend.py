@@ -17,7 +17,7 @@ import os.path, random
 import j2shim as js
 from jinja2 import contextfunction
 
-STATIC = settings.MEDIA_URL
+STATIC = settings.STATIC_URL
 
 register = template.Library()
 
@@ -154,7 +154,10 @@ def get_online_users():
     if not result:
         timefrom = datetime.datetime.now() - datetime.timedelta(minutes=5)
         userlist = Userprofile.objects.filter(last_activity__gt=timefrom).order_by('user__username')
-        newuser = User.objects.filter(is_active=True).order_by('-date_joined')[0]
+        try:
+            newuser = User.objects.filter(is_active=True).order_by('-date_joined')[0]
+        except IndexError:
+            newuser = None
 
         # Stuff this into an object
         result = js.r2s('webview/whos_online_sb.html', { 'userlist' : userlist, 'newuser' : newuser })
