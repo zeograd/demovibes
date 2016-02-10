@@ -30,8 +30,8 @@
 {% endblock %}
 
 {% block headblock %}
-<link rel="stylesheet" href="{{ MEDIA_URL }}openid/css/openid.css" type="text/css" />
-<script type="text/javascript" src="{{ MEDIA_URL }}openid/js/openid-jquery.js"></script>
+<link rel="stylesheet" href="{{ STATIC_URL }}openid/css/openid.css" type="text/css" />
+<script type="text/javascript" src="{{ STATIC_URL }}openid/js/openid-jquery.js"></script>
 <script type="text/javascript">
 $(document).ready(function() {
     openid.init('id_openid_url');
